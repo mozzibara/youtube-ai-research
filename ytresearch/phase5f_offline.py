@@ -17,6 +17,10 @@ from .batch_worker_contract import (
     offline_external_call_guard,
     validate_worker_input_contract,
 )
+from .phase5f_staging import (
+    stage_phase5f_receipt,
+    finish_phase5f_receipted_job,
+)
 from .research_state import RUN_ID
 from .storage import read_json
 
@@ -148,8 +152,11 @@ def run_phase5f_offline_next(
             usage = outcome.get("usage_source")
             if not isinstance(usage, str) or not usage:
                 raise Phase5FOfflineError("PHASE5F_USAGE_REQUIRED")
-            result = finish_worker_contract_job(
-                root, contract, success=True, usage_source=usage,
+            stage_phase5f_receipt(
+                root, contract, now_utc=now + timedelta(seconds=14),
+            )
+            result = finish_phase5f_receipted_job(
+                root, contract, usage_source=usage,
                 now_utc=now + timedelta(seconds=20),
             )
         else:

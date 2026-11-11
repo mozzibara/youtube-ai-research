@@ -23,6 +23,7 @@ ALLOW_EXACT = {
     "docs/PUBLIC_RUNTIME_BOUNDARY.md",
     "docs/PHASE5_WORKER_SAFETY.md",
     "docs/PHASE5F_OFFLINE_ADAPTER.md",
+    "docs/PHASE5F_IMMUTABLE_RECEIPTS.md",
     "docs/RESEARCH_VERIFICATION_POLICY.md",
     "docs/research/LEGACY_PRIVATE_HANDOFF.md",
     "tools/compare_multimodal_runs.py",

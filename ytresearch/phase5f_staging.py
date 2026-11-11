@@ -253,6 +253,12 @@ def verify_phase5f_receipt(root: Path, contract: Mapping[str, Any], *,
     vid = str(contract["video_id"])
     run_id = str(contract["run_id"])
     with closing(_connect(root)) as db:
+        exists = db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (RECEIPT_TABLE,),
+        ).fetchone()
+        if not exists:
+            raise Phase5FReceiptError("PHASE5F_RECEIPT_NOT_COMMITTED")
         row = db.execute(
             "SELECT manifest_sha,attempt FROM " + RECEIPT_TABLE
             + " WHERE plan_sha=? AND video_id=? AND run_id=?",
