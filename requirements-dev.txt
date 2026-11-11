@@ -1,0 +1,2 @@
+# Deterministic offline test environment (no AGY credentials required).
+-r requirements-multimodal.txt

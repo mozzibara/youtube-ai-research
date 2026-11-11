@@ -1,0 +1,598 @@
+"""Phase 4: 19-section evidence report drafting and explicit review boundaries."""
+from __future__ import annotations
+
+from contextlib import closing
+import hashlib
+import json
+from pathlib import Path
+import re
+import tempfile
+import unittest
+
+from PIL import Image
+
+from ytresearch.research_report import (
+    SECTION_TITLES, ResearchReportBlocked, build_research_report,
+)
+from ytresearch.research_state import (
+    open_research_db, record_analysis_checkpoint, sync_research_sources,
+    update_report_review,
+)
+
+
+class ResearchReport19Tests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "research").mkdir()
+        (self.root / "research" / "index.json").write_text(json.dumps({
+            "source_count": 77, "sources": [
+                {"video_id": f"{i:011d}", "playlist_position": i,
+                 "source_id": f"S{i:03d}", "source_ids": [f"S{i:03d}"]}
+                for i in range(1, 78)
+            ],
+        }), encoding="utf-8")
+        sync_research_sources(self.root)
+        self.vid, self.rid = "00000000001", "report_19_fixture"
+        self.vdir = self.root / "data" / "videos" / self.vid
+        self.run = self.vdir / "runs" / self.rid
+        self.run.mkdir(parents=True)
+        self.image = self.run / "board_01.png"
+        Image.new("RGB", (200, 100), (10, 30, 70)).save(self.image)
+        self._write("multimodal_checkpoint.json", {
+            "video_id": self.vid, "run_id": self.rid, "status": "COMPLETED",
+            "last_completed_stage": "markdown_assembled",
+        })
+        self._write("frames_manifest.json", {
+            "frame_count": 1,
+            "frames": [{"frame_id": "frame_001", "width": 200, "height": 100,
+                        "source_width": 200, "source_height": 100, "actual_sec": 1}],
+            "board_count": 1,
+            "boards": [{"path": str(self.image), "board_id": "board_01",
+                        "panel_frame_ids": ["frame_001"], "panel_indices": [1],
+                        "sha256": hashlib.sha256(self.image.read_bytes()).hexdigest()}],
+            "roi_frame_count": 0, "roi_frames": [],
+        })
+        self._write("tiered_analysis.json", {
+            "scene_analyses": [
+                {"scene_id": 1, "chapter_id": 1, "start_sec": 0, "end_sec": 20,
+                 "summary": "클릭하여 NotebookLM 도구를 설정한다.",
+                 "source_scene_ids": [2], "evidence_segment_ids": ["s000001"],
+                 "evidence_ref": "board_01.png (PANEL #01)"},
+            ],
+            "prompts_extracted": [{
+                "evidence_kind": "USER_PROMPT", "timestamp": "00:03",
+                "label": "검색 요청", "verbatim_text": "기술을 정리해줘",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }, {
+                "evidence_kind": "AI_OUTPUT", "timestamp": "00:08",
+                "label": "생성된 답변", "verbatim_text": "결과",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }],
+            "ui_settings_extracted": [{
+                "timestamp": "00:05", "setting_name": "언어",
+                "selected_value": "한국어", "status": "SELF_CHECKED",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }],
+            "research_items": [{
+                "section_id": 7, "text": "영상에서 MCP 서버 연결을 시연함",
+                "timestamp": "00:07", "evidence_ref": "board_01.png (PANEL #01)",
+                "source_segment_ids": ["s000001"],
+            }, {
+                "section_id": 13, "text": "터미널에서 명령어 시연함",
+                "timestamp": "00:11", "source_segment_ids": ["s000002"],
+            }],
+        })
+        self._write("verification.json", {"items": [
+            {"item_id": 1, "final_status": "SELF_CHECKED",
+             "ground_truth": None, "independent_verifier_invoked": False},
+        ]})
+        self._write("parsed_subtitles.json", {
+            "segments": [{"id": "s000001", "text": "도구 연결"},
+                         {"id": "s000002", "text": "명령어 예시"}],
+            "valid_segment_count": 2,
+        }, parent=self.vdir)
+        (self.run / "final_report.md").write_text("# Original evidence (immutable)\n", encoding="utf-8")
+        record_analysis_checkpoint(self.root, self.vid, self.rid)
+
+    def _write(self, filename, data, parent=None):
+        (parent or self.run).joinpath(filename).write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def _modify(self, filename, callback):
+        path = self.run / filename
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        callback(obj)
+        self._write(filename, obj)
+
+    def _attest_claims(self, report_manifest, reviewer="human_authorized",
+                       source_content_match="MATCH", report_hash=None):
+        """Explicit synthetic human review fixture, never generated by AGY."""
+        analysis = json.loads((self.run / "tiered_analysis.json").read_text(encoding="utf-8"))
+        document = {
+            "schema_version": 1, "video_id": self.vid, "run_id": self.rid,
+            "report_sha256": report_hash or report_manifest["report_sha256"],
+            "reviewer": reviewer, "reviewed_at_utc": "2026-11-11T10:00:00+09:00",
+            "decisions": [
+                {
+                    "item_index": n,
+                    "claim_sha256": hashlib.sha256(claim["text"].encode("utf-8")).hexdigest(),
+                    "cited_evidence_ref": claim.get("evidence_ref", ""),
+                    "source_content_match": source_content_match,
+                    "disposition": "QUOTE_AS_UNVERIFIED",
+                    "reviewer_note": "Confirmed as an explicitly unverified quotation of the provided source material.",
+                }
+                for n, claim in enumerate(analysis.get("research_items", []), 1)
+            ],
+        }
+        (self.run / "research_review_decisions.json").write_text(
+            json.dumps(document, ensure_ascii=False), encoding="utf-8"
+        )
+        return document
+
+    def test_all_19_sections_with_sources_and_unapproved_state(self):
+        original = (self.run / "final_report.md").read_bytes()
+        result = build_research_report(self.root, self.vid, self.rid)
+        body = Path(result["report_path"]).read_text(encoding="utf-8")
+        headings = re.findall(r"^## (\d+)\. (.+)$", body, re.MULTILINE)
+        self.assertEqual(len(headings), 19)
+        self.assertEqual([int(x[0]) for x in headings], list(range(1, 20)))
+        self.assertEqual([x[1] for x in headings], list(SECTION_TITLES))
+        self.assertIn("MCP 서버 연결", body)
+        self.assertIn("터미널에서 명령어", body)
+        self.assertIn("기술을 정리해줘", body)
+        self.assertIn("한국어", body)
+        self.assertIn("s000001", body)
+        self.assertIn("board_01.png (PANEL #01)", body)
+        self.assertIn("직접 확인되지 않음", body)
+        self.assertIn("REVIEW_REQUIRED", body)
+        self.assertEqual(result["review_state"], "REVIEW_REQUIRED")
+        self.assertFalse(result["independent_factual_review_completed"])
+        self.assertEqual(result["evidence_stats"]["typed_research_items"], 2)
+        self.assertEqual((self.run / "final_report.md").read_bytes(), original)
+        with closing(open_research_db(self.root)) as db:
+            row = db.execute("SELECT review_state FROM reports "
+                             "WHERE report_kind='RESEARCH_19'").fetchone()
+            self.assertEqual(row[0], "REVIEW_REQUIRED")
+
+    def test_missing_legacy_typed_items_has_honest_gap_label(self):
+        self._modify("tiered_analysis.json", lambda doc: doc.pop("research_items"))
+        result = build_research_report(self.root, self.vid, self.rid)
+        self.assertEqual(result["evidence_stats"]["research_semantic_coverage"],
+                         "LEGACY_V3_NO_TYPED_RESEARCH_ITEMS")
+        self.assertGreater(len(result["sections_without_evidence_candidates"]), 0)
+
+    def test_hallucinated_panel_or_subtitle_cannot_enter_report(self):
+        self._modify("tiered_analysis.json", lambda doc:
+                     doc["research_items"][0].update(
+                         evidence_ref="board_01.png (PANEL #99)"
+                     ))
+        with self.assertRaises(ResearchReportBlocked):
+            build_research_report(self.root, self.vid, self.rid)
+        self.assertFalse((self.run / "research_report_19.md").exists())
+        # Valid image ref, nonexistent subtitle still must fail.
+        self._modify("tiered_analysis.json", lambda doc:
+                     doc["research_items"][0].update(
+                         evidence_ref="board_01.png (PANEL #01)",
+                         source_segment_ids=["s999999"],
+                     ))
+        with self.assertRaises(ResearchReportBlocked):
+            build_research_report(self.root, self.vid, self.rid)
+
+    def test_unsourced_claim_and_unsupported_section_are_blocked(self):
+        self._modify("tiered_analysis.json", lambda doc:
+                     doc["research_items"][0].update(
+                         evidence_ref="", source_segment_ids=[]
+                     ))
+        with self.assertRaises(ResearchReportBlocked):
+            build_research_report(self.root, self.vid, self.rid)
+        self._modify("tiered_analysis.json", lambda doc:
+                     doc["research_items"][0].update(
+                         evidence_ref="board_01.png (PANEL #01)",
+                         source_segment_ids=["s000001"], section_id=19
+                     ))
+        with self.assertRaises(ResearchReportBlocked):
+            build_research_report(self.root, self.vid, self.rid)
+
+    def test_approved_report_cannot_be_silently_rebuilt(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        before = Path(result["report_path"]).read_bytes()
+        self._attest_claims(result)
+        update_report_review(self.root, self.vid, self.rid,
+                             kind="RESEARCH_19", next_state="APPROVED",
+                             reviewer="human_authorized")
+        with self.assertRaisesRegex(ResearchReportBlocked, "APPROVED_REPORT_IMMUTABLE"):
+            build_research_report(self.root, self.vid, self.rid)
+        self.assertEqual(before, Path(result["report_path"]).read_bytes())
+
+
+    def test_audited_quota_and_unproven_workaround_remain_source_claims(self):
+        def change(doc):
+            doc["research_items"] = [{
+                "section_id": 15, "timestamp": "15:06",
+                "text": "무료 플랜은 월간 노트북 100개, 유료 플랜 500개",
+                "claim_origin": "GENERATED_SLIDE",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }, {
+                "section_id": 18, "timestamp": "10:44",
+                "text": "코드 레포지토리를 499,999단어 파일로 분할해 한도 우회",
+                "claim_origin": "AI_GENERATED_OUTPUT",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }]
+        self._modify("tiered_analysis.json", change)
+        result = build_research_report(self.root, self.vid, self.rid)
+        content = Path(result["report_path"]).read_text(encoding="utf-8")
+        self.assertIn("GENERATED_SLIDE", content)
+        self.assertIn("AI_GENERATED_OUTPUT", content)
+        self.assertIn("SERVICE_QUOTA_UNVERIFIED", content)
+        self.assertIn("UNTESTED_WORKAROUND", content)
+        self.assertIn("NOT_REVIEWED", content)
+        self.assertFalse(result["independent_factual_review_completed"])
+        self.assertEqual(result["research_claims_pending_review"], 2)
+        self.assertEqual(result["claim_review_flags"]["SERVICE_QUOTA_UNVERIFIED"], 1)
+        self.assertEqual(result["claim_review_flags"]["UNTESTED_WORKAROUND"], 1)
+
+    def test_gui_and_cli_are_separate_with_zero_real_cli(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        text = Path(result["report_path"]).read_text(encoding="utf-8")
+        section = text.split("## 13. CLI 명령어 및 설정\n", 1)[1].split("## 14.", 1)[0]
+        self.assertIn("### GUI 설정", section)
+        self.assertIn("GUI · 언어: 한국어", section)
+        self.assertIn("실제 터미널에서 실행된 CLI 명령 0건", section)
+        self.assertEqual(result["cli_commands_count"], 0)
+
+    def test_truncated_prompt_is_not_full_and_placeholder_is_not_user_input(self):
+        def change(doc):
+            doc["prompts_extracted"].append({
+                "evidence_kind": "USER_PROMPT",
+                "label": "Fast Research 일부만 보이는 입력",
+                "timestamp": "04:49",
+                "verbatim_text": "Reddit 최근 3개월 자료, 전문가 ...",
+                "transcription_completeness": "TRUNCATED_VISIBLE",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            })
+            doc["prompts_extracted"].append({
+                "evidence_kind": "UI_PLACEHOLDER",
+                "label": "예시 입력 안내",
+                "timestamp": "12:48", "verbatim_text": "타겟 스타일 예시",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            })
+        self._modify("tiered_analysis.json", change)
+        result = build_research_report(self.root, self.vid, self.rid)
+        report = Path(result["report_path"]).read_text(encoding="utf-8")
+        sec10 = report.split("## 10. Prompt Engineering\n", 1)[1].split("## 11.", 1)[0]
+        sec19 = report.split("## 19. Source Citation / Evidence\n", 1)[1]
+        self.assertIn("TRUNCATED_VISIBLE", sec10)
+        self.assertIn("원문 전문 아님", sec10)
+        self.assertNotIn("UI_PLACEHOLDER", sec10)
+        self.assertIn("UI_PLACEHOLDER", sec19)
+        self.assertEqual(result["prompt_truncated_count"], 1)
+
+    def test_manual_workflow_steps_not_inferred_from_chapter_summaries(self):
+        old = build_research_report(self.root, self.vid, self.rid)
+        original = Path(old["report_path"]).read_text(encoding="utf-8")
+        body = original.split("## 14. 실전 Workflow\n", 1)[1].split("## 15.", 1)[0]
+        self.assertIn("재현 가능한 단계별 Workflow 미구축", body)
+        self.assertNotIn("시연 단계 후보: 클릭", body)
+        def change(doc):
+            doc["workflow_steps"] = [{
+                "timestamp": "00:05", "action": "Studio 설정 모달 열기",
+                "interaction_type": "MANUAL_UI",
+                "observed_result": "설정 패널 표시",
+                "evidence_ref": "board_01.png (PANEL #01)",
+            }]
+        self._modify("tiered_analysis.json", change)
+        result = build_research_report(self.root, self.vid, self.rid)
+        report = Path(result["report_path"]).read_text(encoding="utf-8")
+        sec14 = report.split("## 14. 실전 Workflow\n", 1)[1].split("## 15.", 1)[0]
+        self.assertIn("MANUAL_UI", sec14)
+        self.assertIn("설정 패널 표시", sec14)
+        self.assertIn("실행 성공 여부: 독립 검증 전", sec14)
+        self.assertEqual(result["workflow_steps_count"], 1)
+
+    def test_unverified_semantic_match_is_explicit_in_citations_section(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        content = Path(result["report_path"]).read_text(encoding="utf-8")
+        sec19 = content.split("## 19. Source Citation / Evidence\n", 1)[1]
+        self.assertIn("EVIDENCE_CONTENT_MATCH", sec19)
+        self.assertIn("NOT_REVIEWED", sec19)
+        self.assertEqual(result["semantic_evidence_review_status"], "REVIEW_REQUIRED")
+
+    def test_unreferenced_cli_command_blocks_quality_gate(self):
+        self._modify("tiered_analysis.json", lambda doc: doc.update(cli_commands=[
+            {"timestamp": "02:30", "command": "curl example.com",
+             "source_segment_ids": [], "evidence_ref": ""}
+        ]))
+        with self.assertRaisesRegex(ResearchReportBlocked, "QUALITY_GATE_BLOCKED"):
+            build_research_report(self.root, self.vid, self.rid)
+
+    def test_mixed_model_names_remain_unverified(self):
+        self._modify("tiered_analysis.json", lambda doc: doc["research_items"][0].update(
+            section_id=2, text="Gemini 1.5와 Nano Banana Pro의 구동 모델 설명",
+            claim_origin="MIXED_SOURCES",
+        ))
+        result = build_research_report(self.root, self.vid, self.rid)
+        self.assertIn("MODEL_VERSION_ATTRIBUTION_UNVERIFIED", result["claim_review_flags"])
+        self.assertIn("MIXED_CLAIMS_REQUIRE_SPLIT", result["claim_review_flags"])
+        report = Path(result["report_path"]).read_text(encoding="utf-8")
+        self.assertIn("화자 발화·생성 콘텐츠 표기", report)
+
+
+    def test_approval_without_independent_claim_review_is_blocked(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        with self.assertRaisesRegex(ValueError, "HUMAN_SEMANTIC_REVIEW_RECORD_MISSING"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+
+    def test_human_review_mismatch_or_stale_claim_hash_is_blocked(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        self._attest_claims(result, source_content_match="NOT_REVIEWED")
+        with self.assertRaisesRegex(ValueError, "EVIDENCE_CONTENT_MATCH_UNRESOLVED"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+        record = self._attest_claims(result)
+        record["decisions"][0]["claim_sha256"] = "0" * 64
+        (self.run / "research_review_decisions.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "REVIEW_CLAIM_TEXT_CHANGED"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+
+    def test_human_review_identity_and_report_version_must_match(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        self._attest_claims(result, reviewer="another_reviewer")
+        with self.assertRaisesRegex(ValueError, "REVIEWER_ID_MISMATCH"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+        self._attest_claims(result, report_hash="0"*64)
+        with self.assertRaisesRegex(ValueError, "REVIEWED_REPORT_HASH_MISMATCH"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+
+    def test_external_claim_verification_requires_real_source_provenance(self):
+        result = build_research_report(self.root, self.vid, self.rid)
+        record = self._attest_claims(result)
+        record["decisions"][0]["disposition"] = "EXTERNALLY_FACT_CHECKED"
+        (self.run / "research_review_decisions.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(ValueError, "EXTERNAL_FACT_EVIDENCE_MISSING"):
+            update_report_review(self.root, self.vid, self.rid, kind="RESEARCH_19",
+                                 next_state="APPROVED", reviewer="human_authorized")
+
+
+    def test_generic_legacy_claim_is_p2_in_19_section_report(self):
+        # Old V3.4 research_items do not contain claim_origin; this is
+        # not evidence that the claims are wrong or require P0 escalation.
+        report = build_research_report(self.root, self.vid, self.rid)
+        self.assertEqual(report["claim_review_priority_counts"],
+                         {"P0": 0, "P1": 0, "P2": 2})
+        self.assertEqual(report["unverified_claims"], 2)
+        body = Path(report["report_path"]).read_text(encoding="utf-8")
+        self.assertIn("BASELINE_UNVERIFIED_REVIEW", body)
+        self.assertIn("검증 미완료 상태", body)
+        self.assertIn("내용 위험 신호", body)
+        self.assertIn("별도 내용 위험 신호 없음", body)
+        self.assertIn("EVIDENCE_CONTENT_MATCH_NOT_REVIEWED", body)
+
+    def test_high_risk_vs_baseline_labels_are_distinct_in_report(self):
+        def replace(doc):
+            doc["research_items"] = [
+                {
+                    "section_id": 15, "timestamp": "00:01",
+                    "text": "무료 플랜 노트북 100개, 유료 플랜 노트북 500개",
+                    "claim_origin": "GENERATED_SLIDE",
+                    "evidence_ref": "board_01.png (PANEL #01)",
+                },
+                {
+                    "section_id": 1, "timestamp": "00:01",
+                    "text": "요약 문서 화면을 살펴본다",
+                    "evidence_ref": "board_01.png (PANEL #01)",
+                },
+            ]
+        self._modify("tiered_analysis.json", replace)
+        report = build_research_report(self.root, self.vid, self.rid)
+        self.assertEqual(report["claim_review_priority_counts"],
+                         {"P0": 1, "P1": 0, "P2": 1})
+        body = Path(report["report_path"]).read_text(encoding="utf-8")
+        self.assertIn("ACTIONABLE_RISK_SIGNAL", body)
+        self.assertIn("BASELINE_UNVERIFIED_REVIEW", body)
+        self.assertIn("SERVICE_QUOTA_UNVERIFIED", body)
+        self.assertIn("LEGACY_SOURCE_TYPE_UNATTRIBUTED", body)
+
+
+    def _install_reviewed_error_fixture(self):
+        """Import one valid audit-reported error, preserving existing sources."""
+        from ytresearch.claim_adjudication import import_claim_audit
+        original = json.loads((self.run / "tiered_analysis.json").read_text(encoding="utf-8"))
+        rows = original["research_items"]
+        row = rows[0]
+        input_audit = {
+            "schema_version": 1, "audit_id": "test-confirmed-error",
+            "audit_origin": "USER_SUPPLIED_MANUAL_SOURCE_AUDIT",
+            "video_id": self.vid, "run_id": self.rid,
+            "source_analysis_sha256": hashlib.sha256(
+                (self.run / "tiered_analysis.json").read_bytes()).hexdigest(),
+            "source_frames_manifest_sha256": hashlib.sha256(
+                (self.run / "frames_manifest.json").read_bytes()).hexdigest(),
+            "source_subtitles_sha256": hashlib.sha256(
+                (self.vdir / "parsed_subtitles.json").read_bytes()).hexdigest(),
+            "findings": [{
+                "item_index": 1, "section_id": row["section_id"],
+                "claim_sha256": hashlib.sha256(row["text"].encode("utf-8")).hexdigest(),
+                "finding_status": "CONFIRMED_ERROR", "source_match": "PARTIAL",
+                "trigger": "SERVICE_QUOTA_UNVERIFIED",
+                "evidence_refs": ["board_01.png (PANEL #01)"],
+                "subtitle_ids": ["s000001"],
+                "external_sources": ["https://example.org/example-policy"],
+                "review_note": "A source-audited reference was compared with an external policy in the manually imported fixture.",
+                "correction": "Separate the generated content from currently documented external facts.",
+            }],
+        }
+        audit_file = self.root / "manual_audit.json"
+        audit_file.write_text(json.dumps(input_audit, ensure_ascii=False), encoding="utf-8")
+        return import_claim_audit(self.root, audit_file)
+
+    def test_audit_report_and_quality_status_are_separate_from_structural_pass(self):
+        from ytresearch.quality_gate import assess_research_run
+        self._install_reviewed_error_fixture()
+        gate = assess_research_run(self.root, self.vid, self.rid)
+        self.assertEqual(gate["structural_status"], "PASS")
+        self.assertEqual(gate["approval_status"], "NOT_APPROVABLE")
+        self.assertEqual(gate["claim_adjudications"]["status_counts"], {
+            "CONFIRMED_ERROR": 1, "SOURCE_CONFLICT": 0,
+            "UNVERIFIED": 0, "NOT_REVIEWED": 1,
+        })
+        self.assertEqual(gate["metrics"]["audit_claims_reviewed"], 1)
+        self.assertEqual(gate["semantic_evidence_status"],
+                         "AUDIT_REPORTED_REMEDIATION_REQUIRED")
+        output = build_research_report(self.root, self.vid, self.rid)
+        self.assertTrue(output["has_unresolved_confirmed_problem"])
+        self.assertEqual(output["claim_adjudications_status_counts"]["CONFIRMED_ERROR"], 1)
+        report = Path(output["report_path"]).read_text(encoding="utf-8")
+        self.assertIn("CONFIRMED_ERROR", report)
+        self.assertIn("NOT_REVIEWED", report)
+        self.assertIn("수동 출처 감사", report)
+        self.assertIn("USER_SUPPLIED_MANUAL_SOURCE_AUDIT", gate["claim_adjudications"]["audit_provenance"])
+        with self.assertRaisesRegex(ValueError, "UNRESOLVED_CLAIM_ADJUDICATIONS_BLOCK_APPROVAL"):
+            update_report_review(self.root, self.vid, self.rid,
+                                 kind="RESEARCH_19", next_state="APPROVED",
+                                 reviewer="human_authorized")
+
+    def test_tampered_audit_or_analysis_blocks_structural_gate(self):
+        from ytresearch.quality_gate import assess_research_run
+        self._install_reviewed_error_fixture()
+        path = self.run / "tiered_analysis.json"
+        source = json.loads(path.read_text(encoding="utf-8"))
+        source["research_items"][0]["text"] = "tampered after review"
+        path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+        gate = assess_research_run(self.root, self.vid, self.rid)
+        self.assertEqual(gate["structural_status"], "BLOCKED")
+        self.assertTrue(any("CLAIM_ADJUDICATION_STALE_OR_INVALID" in x
+                            for x in gate["errors"]))
+
+
+    def _correction_fixture(self, index=1):
+        path = self.run / "corrections" / f"claim_{index}_revision_01.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = json.loads((self.run / "tiered_analysis.json").read_text(encoding="utf-8"))
+        original_sha = hashlib.sha256(
+            original["research_items"][index - 1]["text"].encode("utf-8")
+        ).hexdigest()
+        document = {
+            "schema_version": 1, "item_index": index,
+            "original_claim_sha256": original_sha,
+            "corrected_text": (
+                "This is a corrected and explicitly attributed discussion of the "
+                "source claim; it is not an official current product policy."
+            ),
+            "change_reason": (
+                "The audited claim contained a source attribution error; "
+                "the correction retains the quoted source as unverified."
+            ),
+            "evidence_refs": ["board_01.png (PANEL #01)"],
+            "external_sources": [],
+        }
+        path.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        return path
+
+    def test_correct_recheck_resolve_separately_and_original_report_stays_blocked(self):
+        from ytresearch.claim_remediation import (
+            record_claim_remediation, summarize_claim_remediations,
+        )
+        from ytresearch.quality_gate import assess_research_run
+        self._install_reviewed_error_fixture()
+        initial = summarize_claim_remediations(self.root, self.vid, self.rid)
+        self.assertEqual(initial["status_counts"]["OPEN"], 1)
+        self.assertTrue(initial["original_report_approval_blocked"])
+        self._correction_fixture()
+        reason = "The audited error needs a source-specific, reviewable correction."
+        first = record_claim_remediation(
+            self.root, self.vid, self.rid, item_index=1,
+            next_status="CORRECTED", actor="correction_author", reason=reason,
+            correction_file="claim_1_revision_01.json",
+        )
+        self.assertEqual(first["status_counts"]["CORRECTED"], 1)
+        second = record_claim_remediation(
+            self.root, self.vid, self.rid, item_index=1,
+            next_status="RECHECKED", actor="independent_reviewer", reason=reason,
+        )
+        self.assertEqual(second["status_counts"]["RECHECKED"], 1)
+        closed = record_claim_remediation(
+            self.root, self.vid, self.rid, item_index=1,
+            next_status="RESOLVED", actor="independent_reviewer", reason=reason,
+        )
+        self.assertEqual(closed["status_counts"]["RESOLVED"], 1)
+        self.assertEqual(closed["event_count"], 3)
+        self.assertTrue(closed["original_report_approval_blocked"])
+        gate = assess_research_run(self.root, self.vid, self.rid)
+        self.assertEqual(gate["structural_status"], "PASS")
+        self.assertEqual(gate["approval_status"], "NOT_APPROVABLE")
+        self.assertEqual(gate["claim_remediation"]["status_counts"]["RESOLVED"], 1)
+        report = build_research_report(self.root, self.vid, self.rid)
+        self.assertTrue(report["has_unresolved_confirmed_problem"])
+        with self.assertRaisesRegex(ValueError, "UNRESOLVED_CLAIM_ADJUDICATIONS_BLOCK_APPROVAL"):
+            update_report_review(self.root, self.vid, self.rid,
+                                 kind="RESEARCH_19", next_state="APPROVED",
+                                 reviewer="independent_reviewer")
+
+    def test_remediation_cannot_skip_steps_or_self_review(self):
+        from ytresearch.claim_remediation import (
+            ClaimRemediationInvalid, record_claim_remediation,
+        )
+        self._install_reviewed_error_fixture()
+        reason = "A human verifier must confirm source-aligned corrected text."
+        with self.assertRaisesRegex(ClaimRemediationInvalid, "REMEDIATION_INVALID_TRANSITION"):
+            record_claim_remediation(self.root, self.vid, self.rid, item_index=1,
+                next_status="RESOLVED", actor="a", reason=reason)
+        with self.assertRaisesRegex(ClaimRemediationInvalid, "REMEDIATION_NOT_A_CONFIRMED_ISSUE"):
+            record_claim_remediation(self.root, self.vid, self.rid, item_index=2,
+                next_status="CORRECTED", actor="a", reason=reason)
+        self._correction_fixture()
+        record_claim_remediation(self.root, self.vid, self.rid, item_index=1,
+            next_status="CORRECTED", actor="author", reason=reason,
+            correction_file="claim_1_revision_01.json")
+        with self.assertRaisesRegex(ClaimRemediationInvalid, "RECHECK_REQUIRES_DIFFERENT_REVIEWER"):
+            record_claim_remediation(self.root, self.vid, self.rid, item_index=1,
+                next_status="RECHECKED", actor="author", reason=reason)
+
+    def test_remediation_artifact_hash_chain_tampering_blocks_gate(self):
+        from ytresearch.claim_remediation import (
+            ClaimRemediationInvalid, record_claim_remediation,
+            summarize_claim_remediations,
+        )
+        from ytresearch.quality_gate import assess_research_run
+        self._install_reviewed_error_fixture()
+        artifact = self._correction_fixture()
+        reason = "Document the observed source discrepancy and the correction."
+        record_claim_remediation(self.root, self.vid, self.rid, item_index=1,
+            next_status="CORRECTED", actor="author", reason=reason,
+            correction_file="claim_1_revision_01.json")
+        artifact.write_text(artifact.read_text() + " ", encoding="utf-8")
+        with self.assertRaisesRegex(ClaimRemediationInvalid, "CORRECTION_ARTIFACT_HASH_CHANGED"):
+            summarize_claim_remediations(self.root, self.vid, self.rid)
+        gate = assess_research_run(self.root, self.vid, self.rid)
+        self.assertEqual(gate["structural_status"], "BLOCKED")
+        self.assertTrue(any("CLAIM_REMEDIATION_LEDGER_INVALID" in msg
+                            for msg in gate["errors"]))
+
+    def test_original_analysis_and_report_are_preserved_after_correcting(self):
+        from ytresearch.claim_remediation import record_claim_remediation
+        self._install_reviewed_error_fixture()
+        old_analysis = (self.run / "tiered_analysis.json").read_bytes()
+        self._correction_fixture()
+        record_claim_remediation(
+            self.root, self.vid, self.rid, item_index=1,
+            next_status="CORRECTED", actor="reviewer_one",
+            reason="Provide a corrected quotation in an independent artifact.",
+            correction_file="claim_1_revision_01.json",
+        )
+        self.assertEqual((self.run / "tiered_analysis.json").read_bytes(), old_analysis)
+        self.assertFalse((self.run / "research_report_19.md").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
