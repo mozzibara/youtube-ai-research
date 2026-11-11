@@ -1,0 +1,53 @@
+# Private corpus and source registries: never commit real research artifacts.
+research/
+benchmarks/
+data/
+cache/
+review/
+audit_upload/
+archive/
+logs/
+credentials/
+.hotfix/
+
+# Source registries and environment secrets.
+sources.csv
+sources.*.csv
+.env
+.env.*
+*.secret
+*.pem
+*.p12
+*.key
+*.pfx
+*.sqlite
+*.sqlite3
+*.db
+
+# Local execution artifacts.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+*.zip
+*.part
+*.temp.*
+
+# Downloaded media, transcriptions and subtitles.
+*.mp4
+*.m4a
+*.webm
+*.mkv
+*.mov
+*.avi
+*.flv
+*.wav
+*.mp3
+*.aac
+*.flac
+*.opus
+*.ogg
+*.json3
+*.vtt
+*.srt
