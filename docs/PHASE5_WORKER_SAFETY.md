@@ -41,3 +41,11 @@ This document captures **implementation decisions**, not private runtime records
 - Actual source trials and paid AGY usage require explicit owner authorization and their own private runtime.
 
 Documentation derived from private historical safety studies; this is a sanitized implementation handoff, not reproduction of the private studies.
+
+## Phase 5F.0 implementation (Public PR #2)
+
+An explicit synthetic-only adapter in `ytresearch/phase5f_offline.py` now connects queue claims, Phase 5E input validation, nine verified local synthetic stages, and frozen usage settlement without invoking AGY, YouTube or network tools. The adapter accepts only the precisely recognized isolated 77-source fixture and fake byte strings; real media are refused before budget reservation.
+
+The optional synthetic 429 failure retains unknown usage reservations and enables the global manual pause. Unexpected adapter results do not advance the lease. The offline guard is for this Python code path, **not** a general operating-system sandbox. Stage execution remains simulation, not real processed media.
+
+The end-to-end orchestration must pass its own Windows/Ubuntu regression tests before any further live integration proposal. See `docs/PHASE5F_OFFLINE_ADAPTER.md`.
