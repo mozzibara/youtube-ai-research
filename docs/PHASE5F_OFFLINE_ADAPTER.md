@@ -38,3 +38,7 @@ The new tests exercise normal completion, global 429 manual pause, retained rese
 - Repeated queue claims are distinct jobs, not a proof that external provider delivery is exactly once. Phase 5E still enforces run-scoped usage settlement and verified-stage replay behavior.
 - Immutable/content-addressed stage staging, crash replay, real adapter authorizations and production-model settlement remain future gated work.
 - No third-party distribution, license grant, private corpus publication or live API execution is authorized by this PR.
+
+## Phase 5F.1 hardened artifact receipts
+
+The success path now stages content-addressed copies of all nine verified stage outputs plus the final checkpoint, and writes an **atomic SQLite receipt** under the original lease and budget ownership. The worker completes usage settlement only after the receipt has been independently verified. See `docs/PHASE5F_IMMUTABLE_RECEIPTS.md`.
