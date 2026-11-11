@@ -51,7 +51,7 @@ The original private repository remains a reference archive, not a GitHub Action
 
 **Immediate:** preserve the public publisher block, restore offline CLI prerequisites, and retain evidence board renderer regression checks. Re-run both OS test matrices and the publication policy audit.
 
-**Before public merge:** complete source redistribution/license review and confirm the required `main` protection rules (including actual expected check names). The historical private PR and original artifacts remain untouched.
+**Before public merge:** verify the existing offline security gate and Windows/Ubuntu regression/stress checks; review the migration changes. The personal maintainer has no current intention to issue MIT/Apache rights or ship binary distributions, so these are **not merge blockers**. Branch protection is recommended as a follow-up for accidental-direct-push prevention, not a required license gate. The private PR and artifacts remain untouched.
 
 **Before Phase 5F live processing:** implement an offline-only worker adapter, immutable content-addressed file staging, atomic idempotent checkpoint settlement and explicit operator approval for any provider calls. An offline PASS is not a production approval.
 

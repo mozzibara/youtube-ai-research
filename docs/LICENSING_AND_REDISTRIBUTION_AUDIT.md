@@ -2,7 +2,7 @@
 
 **Audit date:** 2026-11-11  
 **Scope:** `mozzibara/youtube-ai-research` Draft PR #1, baseline `9153d0a98318d55c8eff9a2f3bb4befde4594b1e`, three requirements manifests and Ubuntu Python 3.12 GitHub Actions installation log.  
-**Decision:** **MIT recommended for verified first-party source code, but not yet granted. Binary redistribution is NOT APPROVED.** No root `LICENSE` file is added by this audit.
+**Current personal-use decision:** **No open-source license is required or being granted** for solo development and GitHub Actions. No third-party collaboration, binary packaging or resale is planned. MIT is an optional future choice only. Binary redistribution is out of scope and must be reviewed if plans change. No root `LICENSE` file is added.
 
 This is a source/dependency inventory, **not** a legal opinion or assurance that every transitive binary artifact has been reviewed. The conclusions apply to the explicitly observed versions only. Manifest ranges currently permit later versions.
 
@@ -72,15 +72,15 @@ Primary evidence:
 
 YouTube terms: https://www.youtube.com/t/terms
 
-## 5. Remaining approval gates
+## 5. Future distribution triggers — not PR #1 merge gates
 
-- [ ] Copyright holder or authorized representative verifies ownership and authority for *all* first-party source, tests, prompts and docs.
-- [ ] Review original-source history and all imported snippets for third-party notices/licensing; resolve provenance of ambiguous code.
-- [ ] Confirm final license choice (MIT recommended; Apache-2.0 alternative), correct copyright notice year/owner, and add **official unmodified license text** to root `LICENSE`.
-- [ ] If redistributing dependencies, generate an OS/architecture-specific SBOM and exact wheel/hash inventory; preserve all notices and required license texts.
-- [ ] Resolve `mutagen` GPL distribution architecture and exact PyAV FFmpeg binary license/exception status, or exclude these from redistributable bundles.
-- [ ] Lock or otherwise record resolved package versions for repeatable audits; current open ranges allow dependency drift.
-- [ ] Distinguish owner-authorized provider calls from YouTube content reuse. Never publish real research assets merely because source code is permissively licensed.
-- [ ] Retain the Draft PR until licensing/redistribution and branch protection policy are accepted.
+These tasks become relevant **only if future plans include open-source licensing, external contributions, distribution of an installer/container/wheel/executable, or re-use of real media**:
 
-**Current disposition:** Source-license **recommended, pending owner rights confirmation**. **Binary redistribution NOT APPROVED**. Raw-media/AI-output redistribution NOT APPROVED. No license was granted or applied by this audit.
+- [ ] Before granting MIT/Apache: confirm rights to all first-party source, prompts, tests, docs and any borrowed snippets; choose a license and add its official text with the correct copyright owner.
+- [ ] Before binary redistribution: generate exact OS/architecture-specific SBOM and wheel/hash inventory; preserve license notices, and resolve the Mutagen GPL and PyAV FFmpeg/x264/x265 obligations.
+- [ ] Before shipping a reproducible installer: lock or record exact dependency versions and verify licenses for the actual artifacts.
+- [ ] Before publishing real video/transcript/model output: separately verify authorization, content rights and private information protections.
+
+**Current PR #1 merge gates are instead:** public file allowlist/security scan, the unconditional `publish-batch` block, Windows and Ubuntu offline unit tests, Phase 5E contracts and Phase 5D synthetic stress, followed by maintainer review. There is no license selection or binary redistribution requirement.
+
+**Current disposition:** personal development and public source hosting without a root `LICENSE`; no general third-party reuse grant. Bundled binaries and raw-media/AI-output redistribution are **not planned**, rather than being necessary work before development may continue.

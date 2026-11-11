@@ -30,6 +30,8 @@ python -m ytresearch phase5d-stress --workers 12 --rounds 3
 
 Contributions go through pull requests and offline CI on Windows and Ubuntu. Avoid printing credentials, raw source URLs, or private research artifacts in logs or CI artifacts. See `docs/PUBLIC_MIGRATION.md`, `docs/PUBLIC_RUNTIME_BOUNDARY.md`, and `docs/research/LEGACY_PRIVATE_HANDOFF.md` for migration gates, executable safety boundaries and decisions recovered from the private history.
 
-## License status
+## License status (personal-use project)
 
-A redistribution/license audit is in progress. Do not infer a permissive license from this public hosting location.
+This repository is public for the maintainer's own development and GitHub Actions use. **No MIT, Apache-2.0 or other open-source license has been granted**, and there is no root `LICENSE` file. Third-party reuse rights are not conferred merely by public visibility (GitHub's platform terms still apply). The maintainer has no current plans for third-party collaboration, binary distribution or selling this code.
+
+Dependency notices and potential future redistribution obligations are documented in `docs/LICENSING_AND_REDISTRIBUTION_AUDIT.md` for reference only. **License selection and binary redistribution approval are not prerequisites for personal development or PR #1 merge.** Private video/transcript output remains excluded.

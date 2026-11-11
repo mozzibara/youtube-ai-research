@@ -4,7 +4,7 @@
 
 The sole target for **new code development and GitHub offline CI** is the public repository. The historical Private repository is read-only reference and private research archive. Do not add a private-repository checkout, access token, full-history mirror or external submodule to Public CI.
 
-Migration remains staged in Draft PR #1 until all safety, license and branch protection gates are reviewed. Public `main` is not the canonical development code until this PR is merged.
+Migration remains staged in PR #1 pending the actual offline security/CI gates. License selection, binary redistribution analysis and organization-style branch protection are **not blockers** for this single-maintainer, no-third-party-distribution project. Public `main` becomes the canonical development code once this PR is merged.
 
 ## Python workflow (offline)
 
@@ -27,7 +27,7 @@ Windows and Ubuntu CI both must pass. Use `pull_request` checks with `contents: 
 - Tests generate synthetic source entries in temporary directories. Never place real source data in `research/` or make it a tracked public directory.
 - Publish only reviewed implementation code and documented invariants. Keep original model output, media and research decisions in their separate private archive.
 - GitHub Actions do not deploy a private worker or authorize model usage. A passing synthetic check does not mean production approval.
-- No automated merge to public `main` before the licensing/security checklist and branch protection configuration.
+- No automated merge to public `main` without successful security/CI checks and an explicit maintainer decision. GitHub branch protection remains recommended defense-in-depth, not a mandatory licensing or CI precondition for this personal project.
 
 ## Operational caveats
 
