@@ -174,10 +174,10 @@ class Phase5F1ReceiptTests(unittest.TestCase):
                     / "runs" / self.run_id / "final_report.md")
         original.write_text("changed original output", encoding="utf-8")
         with self.assertRaisesRegex(
-            Phase5FReceiptError, "PHASE5F_RECEIPT_SOURCE_CHANGED"
+            Phase5FReceiptError, "PHASE5F_RECEIPT_STAGE_INTEGRITY_FAILURE"
         ):
             verify_phase5f_receipt(self.root, contract)
-        with self.assertRaises(Phase5FReceiptError):
+        with self.assertRaises((Phase5FReceiptError, WorkerContractError)):
             self._settle(contract)
         self.assertEqual(batch_queue_status(self.root, self.sha)["counts"]["LEASED"], 1)
 

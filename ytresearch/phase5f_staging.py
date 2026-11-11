@@ -246,44 +246,76 @@ def stage_phase5f_receipt(
     }
 
 
-def verify_phase5f_receipt(root: Path, contract: Mapping[str, Any], *,
-                           verify_sources: bool = True) -> dict[str, Any]:
-    """Verify committed SQLite reference and every SHA-addressed snapshot object."""
+def verify_phase5f_receipt_locked(
+    db, root: Path, contract: Mapping[str, Any], *,
+    verify_sources: bool = True,
+) -> dict[str, Any]:
+    """Verify committed receipt under caller's transaction; no nested DB lock.
+
+    Both the stage chain and the saved object set must match exactly. This
+    check is called INSIDE the same SQLite writer transaction as settlement.
+    """
     root = Path(root).resolve()
+    plan_sha = str(contract["plan_sha256"])
     vid = str(contract["video_id"])
     run_id = str(contract["run_id"])
-    with closing(_connect(root)) as db:
-        exists = db.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (RECEIPT_TABLE,),
-        ).fetchone()
-        if not exists:
-            raise Phase5FReceiptError("PHASE5F_RECEIPT_NOT_COMMITTED")
-        row = db.execute(
-            "SELECT manifest_sha,attempt FROM " + RECEIPT_TABLE
-            + " WHERE plan_sha=? AND video_id=? AND run_id=?",
-            (contract["plan_sha256"], vid, run_id),
-        ).fetchone()
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (RECEIPT_TABLE,),
+    ).fetchone()
+    if not exists:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_NOT_COMMITTED")
+    row = db.execute(
+        "SELECT manifest_sha,attempt FROM " + RECEIPT_TABLE
+        + " WHERE plan_sha=? AND video_id=? AND run_id=?",
+        (plan_sha, vid, run_id),
+    ).fetchone()
     if row is None or row["attempt"] != contract["attempt"]:
         raise Phase5FReceiptError("PHASE5F_RECEIPT_NOT_COMMITTED")
+    manifest_sha = str(row["manifest_sha"])
+    if len(manifest_sha) != 64 or any(x not in "0123456789abcdef" for x in manifest_sha):
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_MANIFEST_CORRUPTED")
     store = _run_dir(root, vid, run_id) / STORE_NAME
-    manifest = _safe_path(root, vid, store / "manifests" / row["manifest_sha"])
+    manifest = _safe_path(root, vid, store / "manifests" / manifest_sha)
     if not manifest.is_file():
         raise Phase5FReceiptError("PHASE5F_RECEIPT_MANIFEST_MISSING")
-    if streaming_file_sha256(manifest)[0] != row["manifest_sha"]:
+    if manifest.stat().st_size > MAX_MANIFEST_BYTES:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_MANIFEST_CORRUPTED")
+    if streaming_file_sha256(manifest)[0] != manifest_sha:
         raise Phase5FReceiptError("PHASE5F_RECEIPT_MANIFEST_CORRUPTED")
     try:
         obj = json.loads(manifest.read_text(encoding="utf-8"))
     except (ValueError, UnicodeError):
         raise Phase5FReceiptError("PHASE5F_RECEIPT_MANIFEST_CORRUPTED") from None
-    if (obj.get("schema_version") != 1
-            or any(obj.get(key) != contract[key] for key in (
-                "plan_sha256", "video_id", "run_id", "attempt"
-            ))):
+    if (
+        not isinstance(obj, dict) or obj.get("schema_version") != 1 or
+        any(obj.get(key) != contract[key] for key in (
+            "plan_sha256", "video_id", "run_id", "attempt"
+        ))
+    ):
         raise Phase5FReceiptError("PHASE5F_RECEIPT_IDENTITY_MISMATCH")
     items = obj.get("artifacts")
     if not isinstance(items, list) or not items or len(items) > MAX_ARTIFACT_COUNT:
         raise Phase5FReceiptError("PHASE5F_RECEIPT_ENTRIES_INVALID")
+
+    try:
+        events = _read_verified_stage_chain_locked(
+            db, root, plan_sha, vid, verify_files_on_disk=verify_sources,
+        )
+    except WorkerContractError as exc:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_STAGE_INTEGRITY_FAILURE") from exc
+    if len(events) != len(MULTIMODAL_STAGES) or any(
+        x["run_id"] != run_id for x in events
+    ):
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_STAGE_CHAIN_MISMATCH")
+    expected = {
+        str(item["relpath"])
+        for event in events
+        for item in event["output_manifest"]["artifacts"]
+    }
+    checkpoint = _run_dir(root, vid, run_id) / "multimodal_checkpoint.json"
+    expected.add(checkpoint.relative_to(root).as_posix())
+
     names = set()
     for item in items:
         if not isinstance(item, dict):
@@ -291,7 +323,8 @@ def verify_phase5f_receipt(root: Path, contract: Mapping[str, Any], *,
         name, sha, size = item.get("relpath"), item.get("sha256"), item.get("size_bytes")
         if (not isinstance(name, str) or name in names or
                 not isinstance(sha, str) or len(sha) != 64 or
-                type(size) is not int or size < 0):
+                any(x not in "0123456789abcdef" for x in sha) or
+                type(size) is not int or not 0 <= size <= MAX_ARTIFACT_BYTES):
             raise Phase5FReceiptError("PHASE5F_RECEIPT_ENTRIES_INVALID")
         names.add(name)
         original = _safe_path(root, vid, root / name)
@@ -299,15 +332,26 @@ def verify_phase5f_receipt(root: Path, contract: Mapping[str, Any], *,
         if not snapshot.is_file() or streaming_file_sha256(snapshot) != (sha, size):
             raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_CORRUPTED")
         if verify_sources:
-            if not original.is_file():
+            if not original.is_file() or streaming_file_sha256(original) != (sha, size):
                 raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_CHANGED")
-            if streaming_file_sha256(original) != (sha, size):
-                raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_CHANGED")
+    if names != expected:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_ARTIFACT_SET_MISMATCH")
     return {
-        "receipt_sha256": row["manifest_sha"],
+        "receipt_sha256": manifest_sha,
         "artifact_count": len(items),
         "verified": True,
     }
+
+
+def verify_phase5f_receipt(
+    root: Path, contract: Mapping[str, Any], *,
+    verify_sources: bool = True,
+) -> dict[str, Any]:
+    """Read-only verification; safe even after successful queue settlement."""
+    with closing(_connect(Path(root).resolve())) as db:
+        return verify_phase5f_receipt_locked(
+            db, root, contract, verify_sources=verify_sources,
+        )
 
 
 def finish_phase5f_receipted_job(
@@ -325,5 +369,5 @@ def finish_phase5f_receipted_job(
     verify_phase5f_receipt(root, contract, verify_sources=True)
     return finish_worker_contract_job(
         root, contract, success=True, usage_source=usage_source,
-        now_utc=now_utc,
+        now_utc=now_utc, require_phase5f_receipt=True,
     )

@@ -1834,6 +1834,7 @@ def finish_worker_contract_job(
     provider_error_code: Optional[str] = None,
     retry_after_seconds: int = 0,
     now_utc: Optional[datetime] = None,
+    require_phase5f_receipt: bool = False,
 ) -> Dict[str, Any]:
     """Complete or pause a leased worker contract job transactionally.
 
@@ -1844,6 +1845,10 @@ def finish_worker_contract_job(
       transient provider failure (job-local pause), retains unsettled budget
       reservation whenever usage is unknown, and logs sanitized audit state.
     """
+    if type(require_phase5f_receipt) is not bool:
+        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_REQUIREMENT_INVALID")
+    if require_phase5f_receipt and not success:
+        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_FOR_SUCCESS_ONLY")
     root_resolved = Path(root).resolve()
     now = _now(now_utc)
     validated = validate_worker_input_contract(
@@ -1877,6 +1882,13 @@ def finish_worker_contract_job(
                 _verify_completed_run_artifacts_on_disk(
                     root_resolved, video_id, run_id, events
                 )
+                if require_phase5f_receipt:
+                    # Verify immutable receipt under THIS SAME SQLite transaction,
+                    # before usage settlement or the final fenced queue update.
+                    from .phase5f_staging import verify_phase5f_receipt_locked
+                    verify_phase5f_receipt_locked(
+                        db, root_resolved, contract, verify_sources=True
+                    )
                 normalized_usage = normalize_agy_usage_contract(
                     usage_source,
                     expected_model_id=exact_model_id,
