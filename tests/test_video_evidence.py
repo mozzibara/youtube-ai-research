@@ -226,23 +226,21 @@ class VideoEvidenceTests(unittest.TestCase):
         # The purpose here is provenance and publication, not processing
         # S005. A real batch would skip this completed S004 and attempt S005.
         # Never let a unit test launch the user's AGY CLI against that URL.
-        with patch("ytresearch.batch.video_one",
-                   side_effect=AssertionError("unexpected external AGY call")), \
-             patch("ytresearch.batch.collect_one",
-                   side_effect=AssertionError("unexpected YouTube API call")), \
-             contextlib.redirect_stdout(io.StringIO()):
-            pub = publish_batch(self.root, expected=2)
-        idx = read_json(self.root / "research" / "index.json")
+        from ytresearch.batch import _write_index, load_active
+        with (
+            patch("ytresearch.batch.video_one", side_effect=AssertionError("unexpected AGY call")),
+            patch("ytresearch.batch.collect_one", side_effect=AssertionError("unexpected YouTube call")),
+        ):
+            idx = _write_index(self.root, load_active(self.root, expected=2))
+            with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+                publish_batch(self.root, expected=2)
+        self.assertEqual(idx, read_json(self.root / "research" / "index.json"))
         self.assertEqual(idx["video_evidence_review_required"], 1)
         self.assertEqual(idx["sources"][0]["status"],
                          "video_evidence_review_required")
         self.assertEqual(idx["sources"][1]["status"], "not_started")
-        self.assertIn(
-            f"research/{VID}/video_evidence/full_gemini.md", pub["paths"]
-        )
-        self.assertIn(
-            f"research/{VID}/video_evidence/full.md", pub["paths"]
-        )
+        self.assertTrue((folder / "full_gemini.md").is_file())
+        self.assertTrue((folder / "full.md").is_file())
 
     def test_video_only_never_forges_source_segment_ids(self):
         fake = FakeGemini("00:01 자막 s000001과 동일하다고 주장")
@@ -301,10 +299,10 @@ class VideoEvidenceTests(unittest.TestCase):
                          "video_evidence_review_required")
         self.assertFalse(idx["sources"][0]["gpt_report"])
         self.assertEqual(idx["sources"][1]["status"], "not_started")
-        with contextlib.redirect_stdout(io.StringIO()):
-            pub = publish_batch(self.root, expected=2)
-        self.assertIn(f"research/{VID}/video_evidence/full.md", pub["paths"])
-        self.assertIn(f"research/{VID}/video_evidence/full.json", pub["paths"])
+        with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+            publish_batch(self.root, expected=2)
+        self.assertTrue((self.root / "research" / VID / "video_evidence" / "full.md").is_file())
+        self.assertTrue((self.root / "research" / VID / "video_evidence" / "full.json").is_file())
 
     def test_no_timestamp_is_an_error_not_accepted_as_full_timeline(self):
         fake = FakeGemini("세부 기술 내용은 언급되었지만 시간이 없습니다")

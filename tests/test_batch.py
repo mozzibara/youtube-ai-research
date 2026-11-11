@@ -101,9 +101,12 @@ class ActivePlaylistBatchTests(unittest.TestCase):
         )
         self.assertEqual(csv_path.read_bytes(), original)
         self.assertIsNone(result["playlist_url"])
-        with contextlib.redirect_stdout(io.StringIO()):
-            publish_batch(self.root, expected=4)  # metadata-only; no AI/network
-        index = read_json(self.root / "research" / "index.json")
+        from ytresearch.batch import _write_index
+        index = _write_index(self.root, load_active(self.root, expected=4))
+        self.assertEqual(read_json(self.root / "research" / "index.json"), index)
+        # The public Git publisher must not be used for index generation.
+        with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+            publish_batch(self.root, expected=4)
         self.assertEqual(index["source_count"], 3)
         self.assertEqual(index["source_entries_count"], 4)
         self.assertEqual(index["duplicate_source_entries"], 1)
