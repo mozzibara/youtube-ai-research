@@ -18,6 +18,7 @@ ALLOW_EXACT = {
     ".github/workflows/unit-tests.yml",
     ".github/workflows/phase5d-offline-stress.yml",
     "docs/PUBLIC_MIGRATION.md",
+    "docs/LICENSING_AND_REDISTRIBUTION_AUDIT.md",
     "docs/DEVELOPMENT.md",
     "docs/PUBLIC_RUNTIME_BOUNDARY.md",
     "docs/PHASE5_WORKER_SAFETY.md",
