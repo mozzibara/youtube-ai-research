@@ -33,3 +33,7 @@ Run `python -m unittest discover -s tests -p test_phase5f_staging.py -v`, the fu
 ## Phase 5F.2 settlement-time checks
 
 The final usage-settlement SQLite transaction now repeats receipt identity, manifest coverage and object digest checks while holding the writer lock. The new receipt-required flag is used only in the offline Phase 5F completion path. See `docs/PHASE5F_SETTLEMENT_FENCE.md`.
+
+## Phase 5F.4 durable object publishing
+
+Content-addressed files now use a same-directory atomic **no-clobber hard link** from their fsynced temporary file, rather than a potentially overwriting `os.replace`. A second writer may reuse an existing SHA-256 object only after digest and size re-verification. POSIX directory entries are also `fsync`ed; unsupported hard-link filesystem operations fail closed rather than falling back to overwrite. Windows can flush file contents but does not expose a portable Python directory `fsync`, so full power-loss durability is not guaranteed. See `docs/PHASE5F_DURABLE_STORE_AUDIT.md`.
