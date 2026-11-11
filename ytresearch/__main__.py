@@ -11,6 +11,38 @@ from .batch import sync_playlist, sync_sources_csv, load_active, batch_timeline,
 from .diagnostics import list_diagnostic_summaries, inspect_saved_response_structure, inspect_saved_claim_sections, inspect_saved_document_summary, inspect_video_access_archive
 from .storage import connect, update_stage_at_root
 
+class PrerequisiteMissing(RuntimeError):
+    """Missing prior-stage input is not a model/provider execution failure."""
+
+
+REQUIRED_FILES = {
+    "extract": ("transcript.json", "transcript.sha256"),
+    "analyze": ("transcript.json", "transcript.sha256", "extraction.json"),
+    "audit": (
+        "transcript.json", "transcript.sha256",
+        "extraction.json", "analysis.md", "analysis_manifest.json",
+    ),
+}
+
+
+def check_prerequisites(root: Path, video_id: str, command: str) -> None:
+    required = REQUIRED_FILES.get(command, ())
+    base = root / "data" / "videos" / video_id
+    missing = [name for name in required if not (base / name).is_file()]
+    if not missing:
+        return
+    if any(name in missing for name in ("transcript.json", "transcript.sha256")):
+        next_step = "collect"
+    elif "extraction.json" in missing:
+        next_step = "extract"
+    else:
+        next_step = "analyze"
+    raise PrerequisiteMissing(
+        f"required prior-stage artifacts missing ({', '.join(missing)}); "
+        f"run {next_step} --video-id <registered synthetic or authorized id>"
+    )
+
+
 
 def main():
     parser = argparse.ArgumentParser(description="YouTube 타임라인 연구: 77개 활성 영상 + 이전 레지스트리 보존")
@@ -687,9 +719,11 @@ def main():
             for row in videos:
                 print(export_gpt(root, row["video_id"]))
         else:
+            failures = 0
             for row in videos:
                 vid = row["video_id"]
                 try:
+                    check_prerequisites(root, vid, args.command)
                     if args.command in ("collect", "run"):
                         if not (root / "data" / "videos" / vid / "transcript.json").exists():
                             print(collect_one(root, vid))
@@ -707,11 +741,16 @@ def main():
                         print(vid, "analyzed", analyze_one(root, vid))
                     if args.command in ("audit", "run"):
                         print(vid, "audited", audit_one(root, vid))
+                except PrerequisiteMissing as exc:
+                    # No provider operation occurred. Preserve the existing stage.
+                    failures += 1
+                    print(f"PREREQUISITE_MISSING {vid}: {exc}", file=sys.stderr)
                 except Exception as exc:
+                    failures += 1
                     update_stage_at_root(root, vid, f"BLOCKED_{args.command.upper()}", error=str(exc)[:500])
                     print(f"BLOCKED {vid}: {exc}", file=sys.stderr)
-                    if args.video_id:
-                        return 1
+            if failures:
+                return 1
     return 0
 
 

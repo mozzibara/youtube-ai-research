@@ -104,6 +104,50 @@ class CliTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "IMPORT_VTT_UNREGISTERED_VIDEO"):
                 cli.main()
 
+    def test_audit_without_transcript_preserves_prior_collected_stage(self):
+        from contextlib import closing
+        from ytresearch.storage import connect, update_stage_at_root
+        video_id = "Tst00000054"
+        update_stage_at_root(self.root, video_id, "COLLECTED")
+        args = ["ytresearch", "--root", str(self.root), "audit", "--video-id", video_id]
+        with (
+            patch.object(sys, "argv", args),
+            patch.object(cli, "audit_one", side_effect=AssertionError("no model")),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            self.assertEqual(cli.main(), 1)
+        self.assertIn("PREREQUISITE_MISSING", err.getvalue())
+        self.assertIn("collect --video-id", err.getvalue())
+        with closing(connect(self.root)) as db:
+            stage = db.execute("SELECT stage FROM videos WHERE video_id=?", (video_id,)).fetchone()[0]
+        self.assertEqual(stage, "COLLECTED")
+
+    def test_audit_missing_extraction_guides_prior_step_without_model_call(self):
+        video_id = "Tst00000054"
+        folder = self.root / "data" / "videos" / video_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "transcript.json").write_text("{}", encoding="utf-8")
+        (folder / "transcript.sha256").write_text("synthetic", encoding="utf-8")
+        args = ["ytresearch", "--root", str(self.root), "audit", "--video-id", video_id]
+        with (
+            patch.object(sys, "argv", args),
+            patch.object(cli, "audit_one", side_effect=AssertionError("no model")),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            self.assertEqual(cli.main(), 1)
+        self.assertIn("extraction.json", err.getvalue())
+        self.assertIn("extract --video-id", err.getvalue())
+
+    def test_batch_missing_audit_prerequisites_returns_nonzero(self):
+        args = ["ytresearch", "--root", str(self.root), "audit", "--limit", "1"]
+        with (
+            patch.object(sys, "argv", args),
+            patch.object(cli, "audit_one", side_effect=AssertionError("no model")),
+            contextlib.redirect_stderr(io.StringIO()) as err,
+        ):
+            self.assertEqual(cli.main(), 1)
+        self.assertIn("PREREQUISITE_MISSING", err.getvalue())
+
     def test_publish_batch_cli_is_disabled_before_config_or_data_access(self):
         nonexisting = self.root / "missing-external-root"
         flags = (
