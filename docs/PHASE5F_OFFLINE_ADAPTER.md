@@ -42,3 +42,7 @@ The new tests exercise normal completion, global 429 manual pause, retained rese
 ## Phase 5F.1 hardened artifact receipts
 
 The success path now stages content-addressed copies of all nine verified stage outputs plus the final checkpoint, and writes an **atomic SQLite receipt** under the original lease and budget ownership. The worker completes usage settlement only after the receipt has been independently verified. See `docs/PHASE5F_IMMUTABLE_RECEIPTS.md`.
+
+## Phase 5F.3 recovery interface
+
+Read-only status and explicit original-lease resume are now available in `ytresearch/phase5f_recovery.py`. These paths operate exclusively on synthetic fixture bytes. They never store or print authorization tokens. See `docs/PHASE5F_OPERATOR_RECOVERY.md`.
