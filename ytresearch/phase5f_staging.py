@@ -56,10 +56,34 @@ def _safe_directory(root: Path, vid: str, path: Path) -> Path:
     return _safe_path(root, vid, candidate)
 
 
+def _sync_store_directory(store: Path) -> None:
+    """Flush new directory entries on POSIX; Windows lacks directory fsync.
+
+    Failure to sync on POSIX means the intended durability guarantee cannot
+    be established. Never report a successfully published object in that case.
+    """
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(store, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_DIRECTORY_SYNC_FAILED") from None
+
+
 def _atomic_content_object(root: Path, video_id: str, store: Path,
                            src: Path | None = None,
                            data: bytes | None = None) -> tuple[str, int]:
-    """Write or recheck a SHA-addressed object; never accept a mismatched object."""
+    """Publish a hash-addressed file via atomic no-clobber hard link, then recheck.
+
+    os.replace would overwrite a target created between exists() and replace(),
+    which can violate concurrent readback of another operator's receipt.
+    Unsupported hard-link filesystems intentionally fail closed.
+    """
     if (src is None) == (data is None):
         raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_INVALID")
     fd, temp_name = tempfile.mkstemp(prefix=".writing-", suffix=".tmp", dir=store)
@@ -94,16 +118,18 @@ def _atomic_content_object(root: Path, video_id: str, store: Path,
             os.fsync(target.fileno())
         sha = digest.hexdigest()
         target_path = _safe_path(root, video_id, store / sha)
-        if target_path.exists():
-            if not target_path.is_file():
-                raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_INVALID")
-            actual_sha, actual_size = streaming_file_sha256(target_path)
-            if actual_sha != sha or actual_size != total:
-                raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_CORRUPTED")
-        else:
-            os.replace(temp, target_path)
-            if target_path.is_symlink():
-                raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_INVALID")
+        # link() is atomic on supported local filesystems, and unlike
+        # os.replace() never clobbers another worker's existing hash object.
+        # The temporary source is a regular file under the same directory.
+        try:
+            os.link(temp, target_path)
+        except FileExistsError:
+            pass  # A competing worker won: verify its bytes before success.
+        except OSError:
+            raise Phase5FReceiptError("PHASE5F_RECEIPT_ATOMIC_LINK_UNSUPPORTED") from None
+        if target_path.is_symlink() or not target_path.is_file():
+            raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_INVALID")
+        _sync_store_directory(store)
         # Verify published object, not just temporary bytes.
         actual_sha, actual_size = streaming_file_sha256(target_path)
         if actual_sha != sha or actual_size != total:
