@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "mode": "SYNTHETIC_DRYRUN_ONLY",
+  "budget_id": "pilot-example-2026-11",
+  "global": {
+    "max_tokens": 150000,
+    "max_api_equivalent_usd": "0.600000"
+  },
+  "models": {
+    "gemini-3.8-flash-medium": {
+      "max_tokens": 100000,
+      "max_api_equivalent_usd": "0.200000",
+      "reserve": {
+        "uncached_input_tokens": 20000,
+        "cache_read_tokens": 2000,
+        "output_tokens": 5000
+      }
+    },
+    "gemini-4-argon-high": {
+      "max_tokens": 100000,
+      "max_api_equivalent_usd": "0.500000",
+      "reserve": {
+        "uncached_input_tokens": 15000,
+        "cache_read_tokens": 1000,
+        "output_tokens": 4000
+      }
+    }
+  },
+  "rate_limit": {
+    "max_requests_per_window": 2,
+    "window_seconds": 60
+  }
+}

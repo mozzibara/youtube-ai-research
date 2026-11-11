@@ -1,0 +1,5 @@
+# Local media/visual processing dependencies. AGY CLI is installed separately.
+-r requirements.txt
+av>=14,<18
+Pillow>=10,<13
+yt-dlp[default]>=2025.1

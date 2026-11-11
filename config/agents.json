@@ -1,0 +1,27 @@
+{
+  "extractor": {
+    "model": "gemini-3.8-flash-medium",
+    "effort": "medium"
+  },
+  "analyzer": {
+    "model": "claude-sonnet-5-5-high",
+    "effort": "high"
+  },
+  "auditor": {
+    "model": "gemini-4-argon-high",
+    "effort": "high"
+  },
+  "max_chars_per_chunk": 2200,
+  "max_retries": 0,
+  "print_timeout": "10m",
+  "heartbeat_seconds": 10,
+  "cli_timeout_seconds": 680,
+  "agy_output_format": "stream-json",
+  "archive_agy_responses": true,
+  "video_extractor": {
+    "model": "gemini-3.8-flash-medium",
+    "effort": "medium"
+  },
+  "agy_video_agent": "yt-research-video",
+  "gemini_video_model": "gemini-3.8-flash"
+}
