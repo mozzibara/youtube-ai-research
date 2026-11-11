@@ -15,3 +15,7 @@ An unverified receipt, conflicting identity, changed file or concurrent settleme
 **Limit:** This prevents stale pre-transaction receipts from being trusted at settlement, but filesystem bytes are not protected against an untrusted writer racing the database transaction. Production would require immutable storage permissions and an isolated process/runtime. No live model, media download or extra licenses are enabled.
 
 Run `python -m unittest discover -s tests -p test_phase5f_settlement_fence.py -v` on Windows and Ubuntu, then the full suite and Phase 5D/5E contracts.
+
+## Phase 5F.3 operator re-entry
+
+If a process ends after a committed receipt but before the atomic budget settlement, the operator can inspect the safe status and explicitly re-present the original lease token to resume only that job. No automatic claim, token recovery, model call, or expiry bypass is implemented. See `docs/PHASE5F_OPERATOR_RECOVERY.md`.
