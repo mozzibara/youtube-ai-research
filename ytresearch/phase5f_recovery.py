@@ -167,6 +167,14 @@ def resume_phase5f_offline_receipt(
     if expiration <= now:
         raise Phase5FRecoveryError("PHASE5F_RECOVERY_LEASE_EXPIRED")
 
+    # A different run ID or an absent/corrupt receipt is never silently
+    # converted into a new job or a fresh provider call.
+    readiness = inspect_phase5f_offline_recovery(
+        root, plan_sha256, video_id=video_id, run_id=run_id, now_utc=now,
+    )["action_code"]
+    if readiness != "ORIGINAL_LEASE_PROOF_REQUIRED":
+        raise Phase5FRecoveryError("PHASE5F_RECOVERY_RECEIPT_NOT_VERIFIED")
+
     with offline_external_call_guard() as tracker:
         contract = build_worker_input_contract(
             root, plan_sha256=plan_sha256, video_id=video_id,
