@@ -298,8 +298,11 @@ def verify_phase5f_receipt(root: Path, contract: Mapping[str, Any], *,
         snapshot = _safe_path(root, vid, store / "objects" / sha)
         if not snapshot.is_file() or streaming_file_sha256(snapshot) != (sha, size):
             raise Phase5FReceiptError("PHASE5F_RECEIPT_OBJECT_CORRUPTED")
-        if verify_sources and streaming_file_sha256(original) != (sha, size):
-            raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_CHANGED")
+        if verify_sources:
+            if not original.is_file():
+                raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_CHANGED")
+            if streaming_file_sha256(original) != (sha, size):
+                raise Phase5FReceiptError("PHASE5F_RECEIPT_SOURCE_CHANGED")
     return {
         "receipt_sha256": row["manifest_sha"],
         "artifact_count": len(items),

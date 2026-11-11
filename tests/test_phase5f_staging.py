@@ -199,7 +199,9 @@ class Phase5F1ReceiptTests(unittest.TestCase):
 
     def test_incomplete_stage_chain_cannot_receive_receipt(self):
         contract = self._contract()
-        with self.assertRaises(WorkerContractError):
+        with self.assertRaisesRegex(
+            Phase5FReceiptError, "PHASE5F_RECEIPT_INCOMPLETE_STAGES"
+        ):
             self._receipt(contract)
         self.assertEqual(batch_queue_status(self.root, self.sha)["counts"]["LEASED"], 1)
 
