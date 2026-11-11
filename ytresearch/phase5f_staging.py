@@ -298,9 +298,12 @@ def verify_phase5f_receipt_locked(
     if not isinstance(items, list) or not items or len(items) > MAX_ARTIFACT_COUNT:
         raise Phase5FReceiptError("PHASE5F_RECEIPT_ENTRIES_INVALID")
 
-    events = _read_verified_stage_chain_locked(
-        db, root, plan_sha, vid, verify_files_on_disk=verify_sources,
-    )
+    try:
+        events = _read_verified_stage_chain_locked(
+            db, root, plan_sha, vid, verify_files_on_disk=verify_sources,
+        )
+    except WorkerContractError as exc:
+        raise Phase5FReceiptError("PHASE5F_RECEIPT_STAGE_INTEGRITY_FAILURE") from exc
     if len(events) != len(MULTIMODAL_STAGES) or any(
         x["run_id"] != run_id for x in events
     ):
