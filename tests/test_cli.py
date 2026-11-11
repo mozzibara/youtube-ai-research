@@ -104,6 +104,25 @@ class CliTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "IMPORT_VTT_UNREGISTERED_VIDEO"):
                 cli.main()
 
+    def test_publish_batch_cli_is_disabled_before_config_or_data_access(self):
+        nonexisting = self.root / "missing-external-root"
+        flags = (
+            (),
+            ("--commit",),
+            ("--commit", "--push", "--acknowledge-rights"),
+        )
+        for args in flags:
+            argv = ["ytresearch", "--root", str(nonexisting), "publish-batch", *args]
+            with self.subTest(args=args), \\
+                 patch.object(sys, "argv", argv), \\
+                 patch.object(cli, "publish_batch", side_effect=AssertionError("must not execute")), \\
+                 contextlib.redirect_stderr(io.StringIO()) as err:
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.main()
+                self.assertEqual(ctx.exception.code, 2)
+                self.assertIn("PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED", err.getvalue())
+        self.assertFalse(nonexisting.exists())
+
     def test_limit_uses_source_order_not_video_id(self):
         additional = self.root / "additional.csv"
         additional.write_text("source_id,url\nS002,https://youtube.com/watch?v=Tst00000002\n", encoding="utf-8")

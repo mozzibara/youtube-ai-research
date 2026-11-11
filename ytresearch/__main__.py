@@ -123,7 +123,7 @@ def main():
                      help="review 모드에서 특정 청크 하나만 확인")
     vid.add_argument("--max-chunks", type=int, default=1,
                      help="review 모드에서 기존 기록과 대조할 청크 수")
-    pub = command.add_parser("publish-batch", help="연구 자료 Git 게시 미리보기/선택적 커밋·푸시")
+    pub = command.add_parser("publish-batch", help="Public 배포본에서 비활성화된 연구자료 Git 게시 명령")
     pub.add_argument("--expected", type=int, default=77)
     pub.add_argument("--commit", action="store_true")
     pub.add_argument("--push", action="store_true")
@@ -244,6 +244,10 @@ def main():
         if name != "export-gpt":
             cmd.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
+    # Public releases may analyze synthetic fixtures but must never Git-publish
+    # private corpora. Reject before reading --root, configuration or registry.
+    if args.command == "publish-batch":
+        parser.error("PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED")
     root = Path(args.root).resolve()
     if (args.command == "extract" and getattr(args, "quarantine_mixed", False)
             and not args.archives_only):

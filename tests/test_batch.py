@@ -369,138 +369,52 @@ class ActivePlaylistBatchTests(unittest.TestCase):
         self.assertEqual(result["sources"][0]["status"], "blocked")
         self.assertEqual(result["sources"][1]["status"], "ready_for_gpt_web")
 
-    def test_publish_is_preview_by_default_and_rights_gated(self):
-        self._sync()
-        self._save_export(self.ids[0])
-        atomic_write(self.root / "research" / "WEB_GPT_ANALYSIS_PROTOCOL.md",
-                     "review source ledger")
-        with contextlib.redirect_stdout(io.StringIO()):
-            preview = publish_batch(self.root, expected=3)
-        self.assertFalse(preview["committed"])
-        self.assertIn("research/index.json", preview["paths"])
-        self.assertIn(f"research/{self.ids[0]}/manifest.json", preview["paths"])
-        # An unrelated private file must not be swept up by a folder add.
-        private = self.root / "research" / self.ids[0] / "credentials.txt"
-        atomic_write(private, "DO_NOT_COMMIT_SECRET")
-        with contextlib.redirect_stdout(io.StringIO()):
-            preview = publish_batch(self.root, expected=3)
-        self.assertNotIn(f"research/{self.ids[0]}/credentials.txt", preview["paths"])
-        with self.assertRaisesRegex(RuntimeError, "PUBLISH_PUSH_REQUIRES_COMMIT"):
-            publish_batch(self.root, expected=3, push=True)
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(RuntimeError, "PUBLISH_RIGHTS_CONFIRMATION_REQUIRED"):
-                publish_batch(self.root, expected=3, commit=True)
-
-    def _init_git_for_publish(self):
-        def git(*args):
-            result = subprocess.run(
-                ["git", "-C", str(self.root), *args],
-                encoding="utf-8", errors="replace", capture_output=True,
-                check=False,
-            )
-            self.assertEqual(
-                result.returncode, 0,
-                f"git {' '.join(args)} failed: {result.stderr[:300]}",
-            )
-            return result.stdout
-        git("init", "-b", "feat/test-publisher")
-        git("config", "user.name", "Research Test")
-        git("config", "user.email", "tester@example.com")
-        atomic_write(self.root / "README.md", "Original repository\n")
-        git("add", "README.md")
-        git("commit", "-m", "test: initial commit")
-        return git
-
-    def _make_publishable_video(self):
-        self._sync()
-        self._save_export(self.ids[0])
-        atomic_write(
-            self.root / "research" / "EXTRACTION_POLICY.md", "Policy\n"
+    def test_publish_is_disabled_for_preview_and_rights_flags(self):
+        scenarios = (
+            {},
+            {"commit": True},
+            {"commit": True, "push": True},
+            {"commit": True, "acknowledge_rights": True},
+            {"commit": True, "push": True, "acknowledge_rights": True,
+             "allow_whitespace_warnings": True},
         )
-        atomic_write(
-            self.root / "research" / "WEB_GPT_ANALYSIS_PROTOCOL.md",
-            "Analysis rules\n",
-        )
+        for options in scenarios:
+            with self.subTest(options=options), \\
+                 patch("ytresearch.batch.load_active", side_effect=AssertionError("registry access")):
+                with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+                    publish_batch(self.root, expected=3, **options)
 
-    def test_publish_resumes_previously_staged_allowlisted_files_without_data_loss(self):
-        self._make_publishable_video()
-        git = self._init_git_for_publish()
-        with contextlib.redirect_stdout(io.StringIO()):
-            preview = publish_batch(self.root, expected=3)
-        git("add", "--", f"research/{self.ids[0]}/transcript.md")
-        git("add", "--", f"research/{self.ids[0]}/timeline/chunk_001.md")
-        before = (self.root / "research" / self.ids[0] / "transcript.md"
-                  ).read_bytes()
-        unrelated = self.root / "research" / self.ids[0] / "credentials.txt"
-        atomic_write(unrelated, "NEVER ADD PRIVATE INFO")
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            result = publish_batch(
-                self.root, expected=3, commit=True,
-                acknowledge_rights=True,
-            )
-        self.assertTrue(result["committed"])
-        self.assertFalse(result["pushed"])
-        self.assertIn("이전 중단으로 남은 staged 파일 2개", output.getvalue())
-        tracked = git("show", "--pretty=format:", "--name-only", "HEAD")
-        self.assertIn(f"research/{self.ids[0]}/transcript.md", tracked)
-        self.assertIn("research/index.json", tracked)
-        self.assertNotIn("credentials.txt", tracked)
-        self.assertEqual(
-            (self.root / "research" / self.ids[0] / "transcript.md").read_bytes(),
-            before,
-        )
-        self.assertEqual(git("diff", "--cached", "--name-only").strip(), "")
+    def test_publish_cannot_write_even_when_private_synthetic_data_exists(self):
+        private = self.root / "research" / self.ids[0] / "transcript.md"
+        private.parent.mkdir(parents=True, exist_ok=True)
+        private.write_text("synthetic private text", encoding="utf-8")
+        before = private.read_bytes()
+        with patch("ytresearch.batch.subprocess.run",
+                   side_effect=AssertionError("git subprocess must never run")):
+            with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+                publish_batch(self.root, expected=3, commit=True, push=True,
+                              acknowledge_rights=True)
+        self.assertEqual(private.read_bytes(), before)
+        self.assertFalse((self.root / ".git").exists())
 
-    def test_publish_rejects_unrelated_staged_file_without_resetting_it(self):
-        self._make_publishable_video()
-        git = self._init_git_for_publish()
-        with contextlib.redirect_stdout(io.StringIO()):
-            publish_batch(self.root, expected=3)
-        atomic_write(self.root / "README.md", "Unrelated staged data\n")
-        git("add", "README.md")
-        with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaisesRegex(
-                RuntimeError, "PUBLISH_UNRELATED_STAGED_CHANGES"
-            ):
-                publish_batch(
-                    self.root, expected=3, commit=True,
-                    acknowledge_rights=True,
-                )
-        self.assertIn("README.md", git("diff", "--cached", "--name-only"))
-        self.assertNotIn("research/index.json", git("diff", "--cached", "--name-only"))
+    def test_publish_rejects_alternate_root_and_force_like_flags(self):
+        other_root = self.root / "other-private-clone"
+        for root in (self.root, other_root, Path("/unlikely-test-path")):
+            with self.subTest(root=str(root)):
+                with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+                    publish_batch(root, commit=True, push=True, expected=0,
+                                  acknowledge_rights=True,
+                                  allow_whitespace_warnings=True)
 
-    def test_publish_whitespace_warning_requires_opt_in_and_can_resume(self):
-        self._make_publishable_video()
-        git = self._init_git_for_publish()
-        notes = self.root / "research" / self.ids[0] / "timeline" / "chunk_001.md"
-        # The raw generated source must not be normalized during publication.
-        atomic_write(notes, "생성된 모델 원문입니다  \n추가 근거 [s000001]\n")
-        before = notes.read_bytes()
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            with self.assertRaisesRegex(
-                RuntimeError, "PUBLISH_WHITESPACE_WARNINGS"
-            ):
-                publish_batch(
-                    self.root, expected=3, commit=True,
-                    acknowledge_rights=True,
-                )
-        self.assertIn("Git 공백 경고", output.getvalue())
-        previous_stage = git("diff", "--cached", "--name-only")
-        self.assertIn(f"research/{self.ids[0]}/timeline/chunk_001.md",
-                      previous_stage)
-        with contextlib.redirect_stdout(io.StringIO()) as output:
-            result = publish_batch(
-                self.root, expected=3, commit=True,
-                acknowledge_rights=True,
-                allow_whitespace_warnings=True,
-            )
-        self.assertTrue(result["committed"])
-        self.assertIn("명시적 승인", output.getvalue())
-        self.assertEqual(notes.read_bytes(), before)
-        self.assertIn(
-            f"research/{self.ids[0]}/timeline/chunk_001.md",
-            git("show", "--pretty=format:", "--name-only", "HEAD"),
-        )
+    def test_publish_cannot_stage_existing_synthetic_git_files(self):
+        # Public policy must be source-wide, not dependent on .gitignore or origin.
+        (self.root / "research").mkdir(exist_ok=True)
+        (self.root / "research" / "index.json").write_text("{}", encoding="utf-8")
+        with patch("ytresearch.batch.subprocess.run",
+                   side_effect=AssertionError("git process must never run")):
+            with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
+                publish_batch(self.root, expected=1, commit=True,
+                              acknowledge_rights=True)
 
     def test_negative_filter_and_entities_are_written_into_real_prompt(self):
         group = [{"id": "s000001", "start": 0.0, "duration": 1.0,
