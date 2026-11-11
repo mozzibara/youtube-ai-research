@@ -31,6 +31,8 @@ def _scan_folder(root: Path, video_id: str, folder: Path) -> tuple[set[str], int
     Do not follow symlink, do not read object bytes, and cap each directory
     to avoid an untrusted process creating an arbitrarily long audit.
     """
+    if folder.is_symlink():
+        raise Phase5FReceiptError("PHASE5F_AUDIT_UNSAFE_DIRECTORY")
     if not folder.exists():
         return set(), 0, 0
     safe = _safe_path(root, video_id, folder)
@@ -97,6 +99,8 @@ def inspect_phase5f_offline_store(
     try:
         run = _run_dir(root, video_id, run_id)
         store = _safe_path(root, video_id, run / STORE_NAME)
+        if store.is_symlink():
+            return result("STORE_UNSAFE")
         if not store.exists():
             if receipt is not None:
                 return result("COMMITTED_RECEIPT_CORRUPT")
