@@ -49,8 +49,9 @@ class Phase5FOfflineTests(unittest.TestCase):
     def test_rate_limit_global_pause_keeps_reservation(self):
         result = self.run_next(SyntheticNineStageAdapter(simulate_rate_limit=True))
         self.assertEqual(result["status"], "PAUSED_FAILURE")
+        self.assertTrue(batch_budget_status(self.root, self.sha)["rate_limit"]["global_paused"])
         self.assertEqual(batch_queue_status(self.root, self.sha)["counts"].get("PAUSED_FAILURE"), 1)
-        self.assertIn("RESERVED", json.dumps(batch_budget_status(self.root, self.sha)))
+        self.assertGreater(batch_budget_status(self.root, self.sha)["global"]["unsettled_reservations"], 0)
         with self.assertRaises((BatchQueueError, WorkerContractError, ValueError)):
             self.run_next()
 
@@ -87,7 +88,7 @@ class Phase5FOfflineTests(unittest.TestCase):
         with self.assertRaisesRegex(Phase5FOfflineError, "PHASE5F_USAGE_REQUIRED"):
             self.run_next(MissingUsage())
         self.assertEqual(batch_queue_status(self.root, self.sha)["counts"].get("LEASED"), 1)
-        self.assertIn("RESERVED", json.dumps(batch_budget_status(self.root, self.sha)))
+        self.assertGreater(batch_budget_status(self.root, self.sha)["global"]["unsettled_reservations"], 0)
 
     def test_run_id_and_exact_model_fail_before_queue_claim(self):
         with self.assertRaisesRegex(Phase5FOfflineError, "PHASE5F_RUN_ID_INVALID"):
