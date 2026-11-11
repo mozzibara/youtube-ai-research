@@ -1305,10 +1305,6 @@ def record_verified_stage_artifact(
     if stage_name not in MULTIMODAL_STAGES:
         raise WorkerContractError("ARTIFACT_INTEGRITY_FAILURE", "STAGE_UNKNOWN_NAME")
 
-    if type(require_phase5f_receipt) is not bool:
-        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_REQUIREMENT_INVALID")
-    if require_phase5f_receipt and not success:
-        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_FOR_SUCCESS_ONLY")
     root_resolved = Path(root).resolve()
     now = _now(now_utc)
     validated = validate_worker_input_contract(
@@ -1849,6 +1845,10 @@ def finish_worker_contract_job(
       transient provider failure (job-local pause), retains unsettled budget
       reservation whenever usage is unknown, and logs sanitized audit state.
     """
+    if type(require_phase5f_receipt) is not bool:
+        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_REQUIREMENT_INVALID")
+    if require_phase5f_receipt and not success:
+        raise WorkerContractError("CONTRACT_VIOLATION", "RECEIPT_FOR_SUCCESS_ONLY")
     root_resolved = Path(root).resolve()
     now = _now(now_utc)
     validated = validate_worker_input_contract(
