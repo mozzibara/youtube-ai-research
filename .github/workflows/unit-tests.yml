@@ -61,6 +61,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Phase 5E offline worker contracts
         run: python -m ytresearch phase5e-validate
+      - name: Phase 5F offline recovery, receipts and no-clobber preflight
+        run: python -m ytresearch phase5f-validate
       - name: Phase 5D offline 12x3 contention and budget stress
         run: python -m ytresearch phase5d-stress --workers 12 --rounds 3
       - name: Summarize safe test results

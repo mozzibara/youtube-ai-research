@@ -97,6 +97,10 @@ def main():
         "phase5e-validate",
         help="Phase 5E: 통합 전 작업자 안전 계약·무결성·사용량 오프라인 검증 (외부 호출 0건)",
     )
+    command.add_parser(
+        "phase5f-validate",
+        help="Phase 5F: 모든 입력을 임시 합성 공간에 생성해 복구·429·무결성 검증 (외부 호출 0건)",
+    )
     bq = command.add_parser(
         "batch-queue",
         help="Phase 5B: 모델 호출 없는 단일 작업자 임대·복구 모의 실행",
@@ -280,6 +284,14 @@ def main():
     # private corpora. Reject before reading --root, configuration or registry.
     if args.command == "publish-batch":
         parser.error("PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED")
+    if args.command == "phase5f-validate":
+        # Runs in disposable isolated temporary workspaces only. The provided
+        # --root is deliberately ignored: no private registry or provider calls.
+        import json
+        from .phase5f_validation import run_phase5f_validation_suite
+        report = run_phase5f_validation_suite()
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report["failed_scenarios"] == 0 else 2
     root = Path(args.root).resolve()
     if (args.command == "extract" and getattr(args, "quarantine_mixed", False)
             and not args.archives_only):
