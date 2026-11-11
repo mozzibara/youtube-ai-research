@@ -8,11 +8,12 @@ An offline-testable Python toolkit for structured YouTube source processing, mul
 
 Use Python 3.12 or 3.13 in an isolated environment. Install development dependencies with `python -m pip install -r requirements-dev.txt`.
 
-Run deterministic offline checks:
+Run deterministic offline checks (including Phase 5F synthetic queue-to-worker integration):
 
 ```sh
 python -m compileall -q ytresearch tests tools
 python -m unittest discover -s tests -v
+python -m unittest discover -s tests -p test_phase5f_offline.py -v
 python -m ytresearch phase5e-validate
 python -m ytresearch phase5d-stress --workers 12 --rounds 3
 ```
