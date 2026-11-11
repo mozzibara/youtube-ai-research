@@ -379,7 +379,7 @@ class ActivePlaylistBatchTests(unittest.TestCase):
              "allow_whitespace_warnings": True},
         )
         for options in scenarios:
-            with self.subTest(options=options), \\
+            with self.subTest(options=options), \
                  patch("ytresearch.batch.load_active", side_effect=AssertionError("registry access")):
                 with self.assertRaisesRegex(RuntimeError, "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED"):
                     publish_batch(self.root, expected=3, **options)

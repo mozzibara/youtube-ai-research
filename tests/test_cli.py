@@ -113,9 +113,9 @@ class CliTests(unittest.TestCase):
         )
         for args in flags:
             argv = ["ytresearch", "--root", str(nonexisting), "publish-batch", *args]
-            with self.subTest(args=args), \\
-                 patch.object(sys, "argv", argv), \\
-                 patch.object(cli, "publish_batch", side_effect=AssertionError("must not execute")), \\
+            with self.subTest(args=args), \
+                 patch.object(sys, "argv", argv), \
+                 patch.object(cli, "publish_batch", side_effect=AssertionError("must not execute")), \
                  contextlib.redirect_stderr(io.StringIO()) as err:
                 with self.assertRaises(SystemExit) as ctx:
                     cli.main()
