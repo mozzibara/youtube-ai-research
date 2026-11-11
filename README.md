@@ -28,7 +28,7 @@ python -m ytresearch phase5d-stress --workers 12 --rounds 3
 
 ## Development process
 
-Contributions go through pull requests and offline CI on Windows and Ubuntu. Avoid printing credentials, raw source URLs, or private research artifacts in logs or CI artifacts. See `docs/PUBLIC_MIGRATION.md` for the migration's acceptance gates after that file is added.
+Contributions go through pull requests and offline CI on Windows and Ubuntu. Avoid printing credentials, raw source URLs, or private research artifacts in logs or CI artifacts. See `docs/PUBLIC_MIGRATION.md`, `docs/PUBLIC_RUNTIME_BOUNDARY.md`, and `docs/research/LEGACY_PRIVATE_HANDOFF.md` for migration gates, executable safety boundaries and decisions recovered from the private history.
 
 ## License status
 

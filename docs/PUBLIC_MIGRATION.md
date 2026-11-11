@@ -22,7 +22,10 @@ The tests use synthetic 11-character video identifiers with `Tst`/`Ytx` prefixes
 3. Pass `phase5e-validate` (16 synthetic scenarios).
 4. Pass `phase5d-stress --workers 12 --rounds 3` with no violations.
 5. Require successful Windows and Ubuntu GitHub Actions checks.
-6. Keep the migration PR in Draft until all safety and licensing reviews are complete. Do not merge automatically.
+6. Verify public `publish-batch` is blocked at the CLI and Python API even with `--commit --push --acknowledge-rights`.
+7. Confirm missing CLI prerequisites preserve their previous stage and fail with a nonzero exit code.
+8. Review historical evidence-panel and PNG rendering regression tests without importing old production modules.
+9. Keep the migration PR in Draft until all safety and licensing reviews are complete. Do not merge automatically.
 
 Passing synthetic CI does not authorize real YouTube downloading, paid AGY calls, output publication or production use. Real processing remains subject to separate authorization in a private execution environment.
 

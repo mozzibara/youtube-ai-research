@@ -570,15 +570,6 @@ def main():
             print(f"{args.video_id}: video-only evidence saved; "
                   f"access={result['access_status']}, review required")
         return 0
-    if args.command == "publish-batch":
-        result = publish_batch(
-            root, expected=args.expected, commit=args.commit,
-            push=args.push, acknowledge_rights=args.acknowledge_rights,
-            allow_whitespace_warnings=args.allow_whitespace_warnings,
-        )
-        print(f"게시 준비 영상={result['count']}, 커밋={result['committed']}, "
-              f"푸시={result['pushed']}")
-        return 0
     if args.command == "init":
         db = connect(root)
         db.close()

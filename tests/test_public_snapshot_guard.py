@@ -34,6 +34,16 @@ class PublicSnapshotAuditTests(unittest.TestCase):
             "TOKEN_LIKE_LITERAL", scan_record("tests/fixture.py", token)
         )
 
+    def test_public_publisher_guard_cannot_be_removed(self):
+        self.assertIn(
+            "RESEARCH_PUBLICATION_GATE_MISSING",
+            scan_record("ytresearch/batch.py", "def publish_batch(): pass"),
+        )
+        self.assertIn(
+            "RESEARCH_PUBLICATION_GATE_MISSING",
+            scan_record("ytresearch/__main__.py", "def main(): return 0"),
+        )
+
     def test_nonexample_email_is_rejected(self):
         email = "operator" + "@" + "nonexample.invalid"
         self.assertIn("NON_EXAMPLE_EMAIL", scan_record("tests/fixture.py", email))

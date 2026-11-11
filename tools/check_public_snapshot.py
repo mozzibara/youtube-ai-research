@@ -18,6 +18,11 @@ ALLOW_EXACT = {
     ".github/workflows/unit-tests.yml",
     ".github/workflows/phase5d-offline-stress.yml",
     "docs/PUBLIC_MIGRATION.md",
+    "docs/DEVELOPMENT.md",
+    "docs/PUBLIC_RUNTIME_BOUNDARY.md",
+    "docs/PHASE5_WORKER_SAFETY.md",
+    "docs/RESEARCH_VERIFICATION_POLICY.md",
+    "docs/research/LEGACY_PRIVATE_HANDOFF.md",
     "tools/compare_multimodal_runs.py",
     "tools/check_public_snapshot.py",
 }
@@ -56,6 +61,9 @@ def scan_record(path: str, content: str) -> list[str]:
         )
     ):
         violations.append("NON_ALLOWLISTED_FILE")
+    if path in ("ytresearch/batch.py", "ytresearch/__main__.py"):
+        if "PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED" not in content:
+            violations.append("RESEARCH_PUBLICATION_GATE_MISSING")
     if path.startswith(("research/", "data/", "cache/", "benchmarks/")):
         violations.append("PRIVATE_CORPUS_PATH")
     if any(pattern.search(content) for pattern in TOKEN_PATTERNS):
