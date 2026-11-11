@@ -29,3 +29,7 @@ Do not persist a raw lease token to Git, Actions logs or PR artifacts. The calle
 ## Offline checks
 
 Run `python -m unittest discover -s tests -p test_phase5f_staging.py -v`, the full suite, Phase 5E validation and Phase 5D stress on Windows and Ubuntu.
+
+## Phase 5F.2 settlement-time checks
+
+The final usage-settlement SQLite transaction now repeats receipt identity, manifest coverage and object digest checks while holding the writer lock. The new receipt-required flag is used only in the offline Phase 5F completion path. See `docs/PHASE5F_SETTLEMENT_FENCE.md`.
