@@ -33,3 +33,7 @@ python -m ytresearch phase5d-stress --workers 12 --rounds 3
 ```
 
 No real videos, model calls, token persistence, binary distribution or third-party license grant are involved.
+
+## Phase 5F.5 integrated synthetic preflight
+
+The standalone `python -m ytresearch phase5f-validate` command repeats seven disposable tests without reading the caller's `--root` or private source registry. It is now part of the Windows/Ubuntu public CI matrix. See `docs/PHASE5F_OFFLINE_PREFLIGHT.md`.
