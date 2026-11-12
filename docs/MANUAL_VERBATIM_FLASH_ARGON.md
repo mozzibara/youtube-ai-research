@@ -83,3 +83,32 @@ artifacts must never be committed to the Public repository.
 Do not claim exact spoken-word fidelity solely because the caption timeline
 is complete or two models agree. Verify questionable intervals by listening
 to source audio; preserve [unintelligible] markers rather than guessing.
+
+
+## H.264/AAC compatibility for Windows and interactive AGY
+
+The existing playback_with_audio.mp4 preserves the source AV1 codec and
+may show an AV1 unsupported error in Windows Media Player. PyAV may still
+decode it successfully. Microsoft AV1 Video Extension is an option for
+local playback, but does not guarantee AGY media compatibility.
+
+A separate H.264 video with the original AAC bitstream is more widely
+compatible. Install FFmpeg if it is absent:
+
+    winget install --id Gyan.FFmpeg --exact --accept-package-agreements --accept-source-agreements
+
+Open a fresh PowerShell session so ffmpeg can be found on PATH, then:
+
+    & $python -m ytresearch --root $runtime verbatim-manual playback-compatible --manifest $manifest
+
+Output: data/verbatim/<video-id>/playback_h264_aac.mp4.
+The 720p video is re-encoded with libx264 CRF 19 and yuv420p; the AAC
+audio stream is copied without re-encoding. The original AV1, 4K,
+AAC, JSON3, and previously remuxed MP4 are never modified. A temporary
+output is checked for codec, duration, dimensions and decodable video
+and audio before publishing without overwrite.
+
+This is not a lossless conversion of video frames; preserve the 4K AV1
+original for exact-resolution screenshot evidence. Play and hear the
+result on the local system before attaching to AGY; this does not yet
+prove that the AGY model processed the audio stream.

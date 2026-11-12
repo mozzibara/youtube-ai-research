@@ -280,7 +280,7 @@ def main():
         if name != "export-gpt":
             cmd.add_argument("--limit", type=int, default=None)
     manual = command.add_parser("verbatim-manual", help="원문 충실 수동 영상 전사 준비·자료 보관 (AGY 호출 없음)")
-    manual.add_argument("operation", choices=("prepare","playback","screen","import","export"))
+    manual.add_argument("operation", choices=("prepare","playback","playback-compatible","screen","import","export"))
     manual.add_argument("--manifest", type=Path, required=True)
     manual.add_argument("--second", type=float)
     manual.add_argument("--stage", choices=("flash","argon"))
@@ -292,12 +292,14 @@ def main():
         parser.error("PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED")
     if args.command == "verbatim-manual":
         import json
-        from .manual_verbatim import prepare, playback, screen, import_review, export
+        from .manual_verbatim import prepare, playback, playback_compatible, screen, import_review, export
         root = Path(args.root).resolve()
         if args.operation == "prepare":
             result = prepare(root, args.manifest)
         elif args.operation == "playback":
             result = playback(root, args.manifest)
+        elif args.operation == "playback-compatible":
+            result = playback_compatible(root, args.manifest)
         elif args.operation == "screen":
             if args.second is None:
                 parser.error("screen requires --second")
