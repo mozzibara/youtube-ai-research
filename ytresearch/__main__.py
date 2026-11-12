@@ -279,11 +279,37 @@ def main():
                                   "보조 문서는 검수 대기로 보존 (archives-only 필수)")
         if name != "export-gpt":
             cmd.add_argument("--limit", type=int, default=None)
+    manual = command.add_parser("verbatim-manual", help="원문 충실 수동 영상 전사 준비·자료 보관 (AGY 호출 없음)")
+    manual.add_argument("operation", choices=("prepare","playback","screen","import","export"))
+    manual.add_argument("--manifest", type=Path, required=True)
+    manual.add_argument("--second", type=float)
+    manual.add_argument("--stage", choices=("flash","argon"))
+    manual.add_argument("--file", type=Path)
     args = parser.parse_args()
     # Public releases may analyze synthetic fixtures but must never Git-publish
     # private corpora. Reject before reading --root, configuration or registry.
     if args.command == "publish-batch":
         parser.error("PUBLIC_REPOSITORY_RESEARCH_PUBLISH_DISABLED")
+    if args.command == "verbatim-manual":
+        import json
+        from .manual_verbatim import prepare, playback, screen, import_review, export
+        root = Path(args.root).resolve()
+        if args.operation == "prepare":
+            result = prepare(root, args.manifest)
+        elif args.operation == "playback":
+            result = playback(root, args.manifest)
+        elif args.operation == "screen":
+            if args.second is None:
+                parser.error("screen requires --second")
+            result = screen(root, args.manifest, args.second)
+        elif args.operation == "import":
+            if args.stage is None or args.file is None:
+                parser.error("import requires --stage and --file")
+            result = import_review(root, args.manifest, args.stage, args.file)
+        else:
+            result = export(root, args.manifest)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "phase5f-validate":
         # Runs in disposable isolated temporary workspaces only. The provided
         # --root is deliberately ignored: no private registry or provider calls.
