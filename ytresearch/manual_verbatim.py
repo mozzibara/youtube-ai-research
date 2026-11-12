@@ -6,6 +6,8 @@ import hashlib
 import heapq
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 import re
 
@@ -215,6 +217,85 @@ def playback(root, manifest):
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+
+def _compatible_ffmpeg_command(ffmpeg, video, audio, destination):
+    """Encode only video; preserve AAC bitstream with an explicit stream map."""
+    return [
+        str(ffmpeg), "-hide_banner", "-nostdin", "-loglevel", "error", "-n",
+        "-i", str(video), "-i", str(audio),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "19",
+        "-pix_fmt", "yuv420p", "-tag:v", "avc1",
+        "-c:a", "copy", "-movflags", "+faststart", str(destination),
+    ]
+
+
+def playback_compatible(root, manifest):
+    """Create a distinct H.264/AAC MP4; never change source AV1 or AAC."""
+    paths, out = inputs(root, manifest)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise VerbatimError("FFMPEG_MISSING_INSTALL_GYAN_FFMPEG")
+    out.mkdir(parents=True, exist_ok=True)
+    dest = out / "playback_h264_aac.mp4"
+    temp = out / ".playback_h264_aac.partial.mp4"
+    if dest.exists() or dest.is_symlink() or temp.exists() or temp.is_symlink():
+        raise VerbatimError("COMPATIBLE_OUTPUT_ALREADY_EXISTS")
+    try:
+        try:
+            completed = subprocess.run(
+                _compatible_ffmpeg_command(
+                    ffmpeg, paths["primary_video"], paths["audio"], temp,
+                ),
+                capture_output=True, text=True, timeout=1800, check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VerbatimError("COMPATIBLE_FFMPEG_TIMEOUT") from exc
+        if completed.returncode != 0:
+            # Raw stderr may contain private local paths and data.
+            raise VerbatimError("COMPATIBLE_FFMPEG_FAILED")
+        if not temp.is_file() or temp.stat().st_size <= 0:
+            raise VerbatimError("COMPATIBLE_FFMPEG_EMPTY_OUTPUT")
+
+        import av
+        with av.open(str(paths["primary_video"])) as original:
+            source = original.streams.video[0]
+            dimensions = (source.codec_context.width, source.codec_context.height)
+            source_duration = (
+                original.duration / av.time_base if original.duration else None
+            )
+        with av.open(str(temp)) as output:
+            if len(output.streams.video) != 1 or len(output.streams.audio) != 1:
+                raise VerbatimError("COMPATIBLE_STREAM_COUNT_MISMATCH")
+            v, a = output.streams.video[0], output.streams.audio[0]
+            if v.codec_context.name != "h264" or a.codec_context.name != "aac":
+                raise VerbatimError("COMPATIBLE_CODEC_MISMATCH")
+            if (v.codec_context.width, v.codec_context.height) != dimensions:
+                raise VerbatimError("COMPATIBLE_DIMENSIONS_MISMATCH")
+            duration = output.duration / av.time_base if output.duration else None
+            if (not duration or not source_duration
+                    or abs(duration - source_duration) > 5):
+                raise VerbatimError("COMPATIBLE_DURATION_MISMATCH")
+        with av.open(str(temp)) as check:
+            if next(check.decode(video=0), None) is None:
+                raise VerbatimError("COMPATIBLE_VIDEO_UNDECODABLE")
+        with av.open(str(temp)) as check:
+            if next(check.decode(audio=0), None) is None:
+                raise VerbatimError("COMPATIBLE_AUDIO_UNDECODABLE")
+        os.link(temp, dest)  # atomic no-clobber publication in same directory
+        return {
+            "status": "PLAYBACK_COMPATIBLE_CREATED",
+            "video_codec": "h264", "audio_codec": "aac",
+            "video_reencoded": True, "audio_copied": True,
+            "duration_seconds": round(duration, 3),
+            "size_mib": round(dest.stat().st_size / 1048576, 2),
+            "actual_agy_calls": 0,
+        }
+    finally:
+        if temp.exists() and not temp.is_symlink():
+            temp.unlink()
 
 
 def screen(root, manifest, seconds):

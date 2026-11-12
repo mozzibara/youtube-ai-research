@@ -100,6 +100,38 @@ class ManualVerbatimTests(unittest.TestCase):
             output.calls, [("libdav1d-av1", True), ("aac", True)]
         )
 
+
+    def test_ffmpeg_command_h264_video_aac_stream_copy(self):
+        from ytresearch.manual_verbatim import _compatible_ffmpeg_command
+
+        cmd = _compatible_ffmpeg_command(
+            "ffmpeg.exe", "video.mp4", "audio.m4a", "output.partial.mp4",
+        )
+        self.assertEqual(cmd[0], "ffmpeg.exe")
+        self.assertEqual([cmd[i+1] for i, x in enumerate(cmd) if x == "-map"],
+                         ["0:v:0", "1:a:0"])
+        self.assertEqual(cmd[cmd.index("-c:v")+1], "libx264")
+        self.assertEqual(cmd[cmd.index("-c:a")+1], "copy")
+        self.assertEqual(cmd[cmd.index("-pix_fmt")+1], "yuv420p")
+        self.assertIn("-n", cmd)
+        self.assertEqual(cmd[-1], "output.partial.mp4")
+
+    def test_missing_ffmpeg_does_not_modify_source(self):
+        from ytresearch.manual_verbatim import playback_compatible
+
+        with tempfile.TemporaryDirectory() as d:
+            root, manifest, assets = self.make_files(d)
+            before = {k: v["sha256"] for k, v in assets.items()}
+            with (patch("ytresearch.manual_verbatim.read_source_ledger",
+                        return_value={"videos": [{"video_id": "Tst00000001"}]}),
+                  patch("ytresearch.manual_verbatim.shutil.which", return_value=None)):
+                with self.assertRaisesRegex(VerbatimError, "FFMPEG_MISSING"):
+                    playback_compatible(root, manifest)
+            self.assertEqual(
+                {k: hashlib.sha256(Path(v["path"]).read_bytes()).hexdigest()
+                 for k, v in assets.items()}, before,
+            )
+
     def test_no_audio_proof_from_json3(self):
         text, events, used = render_captions(json.dumps({
             "events": [{"tStartMs": 0, "segs": [{"utf8": "word word"}]}]}).encode())
