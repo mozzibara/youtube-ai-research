@@ -28,6 +28,7 @@ ALLOW_EXACT = {
     "docs/PHASE5F_OPERATOR_RECOVERY.md",
     "docs/PHASE5F_DURABLE_STORE_AUDIT.md",
     "docs/PHASE5F_OFFLINE_PREFLIGHT.md",
+    "docs/MANUAL_VERBATIM_FLASH_ARGON.md",
     "docs/RESEARCH_VERIFICATION_POLICY.md",
     "docs/research/LEGACY_PRIVATE_HANDOFF.md",
     "tools/compare_multimodal_runs.py",

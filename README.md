@@ -1,5 +1,7 @@
 # YouTube AI Research
 
+**Current goal: manual source-faithful full-video transcript with timestamped screenshots.** Interactive AGY Gemini Flash is first-pass transcription, Gemini Argon is omission review. Automated batches and 19-section analysis are no longer primary deliverables. See docs/MANUAL_VERBATIM_FLASH_ARGON.md.
+
 An offline-testable Python toolkit for structured YouTube source processing, multimodal evidence, research verification, and controlled batch-worker orchestration.
 
 > **Migration draft.** This public repository contains code and synthetic fixtures only. Real source registries, transcripts, screenshots, model responses, private analysis, credentials and prior private Git history are intentionally excluded.
