@@ -78,6 +78,28 @@ class ManualVerbatimTests(unittest.TestCase):
                 with self.assertRaisesRegex(VerbatimError, "ASSET_"):
                     inputs(root, mf)
 
+    def test_remux_streams_use_opaque_codec_copy_for_decoder_only_av1(self):
+        from ytresearch.manual_verbatim import _create_remux_streams
+
+        class FakeOutput:
+            def __init__(self):
+                self.calls = []
+
+            def add_stream_from_template(self, stream, *, opaque=False):
+                self.calls.append((stream, opaque))
+                if not opaque:
+                    raise RuntimeError("UnknownCodecError: libdav1d")
+                return "copied-" + stream
+
+        output = FakeOutput()
+        self.assertEqual(
+            _create_remux_streams(output, ("libdav1d-av1", "aac")),
+            ["copied-libdav1d-av1", "copied-aac"],
+        )
+        self.assertEqual(
+            output.calls, [("libdav1d-av1", True), ("aac", True)]
+        )
+
     def test_no_audio_proof_from_json3(self):
         text, events, used = render_captions(json.dumps({
             "events": [{"tStartMs": 0, "segs": [{"utf8": "word word"}]}]}).encode())

@@ -156,6 +156,19 @@ def prepare(root, manifest):
             "raw_events": total, "audio_verified": False, "actual_agy_calls": 0}
 
 
+def _create_remux_streams(output, in_streams):
+    """Copy codec parameters without looking up a matching encoder.
+
+    The PyAV 17.1.0 Windows wheel decodes AV1 with libdav1d but does not
+    expose a libdav1d encoder. The opaque=True template path is intended for
+    remuxing pre-encoded packets, not for decoding and re-encoding frames.
+    """
+    return [
+        output.add_stream_from_template(stream, opaque=True)
+        for stream in in_streams
+    ]
+
+
 def playback(root, manifest):
     """Repackage silent video + AAC into an interactive AGY audiovisual MP4."""
     paths, out = inputs(root, manifest)
@@ -173,7 +186,7 @@ def playback(root, manifest):
                 raise VerbatimError("STREAM_MISSING")
             output = stack.enter_context(av.open(str(tmp), "w", format="mp4"))
             in_streams = (vid.streams.video[0], aud.streams.audio[0])
-            out_streams = [output.add_stream_from_template(s) for s in in_streams]
+            out_streams = _create_remux_streams(output, in_streams)
             iters = [iter(vid.demux(in_streams[0])), iter(aud.demux(in_streams[1]))]
             heap = []
 
