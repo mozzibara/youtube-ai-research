@@ -26,6 +26,8 @@ class AgymediaContractTests(unittest.TestCase):
         self.assertEqual(probe.audio_result_filename("audio", "mp3"), "flash_audio_mp3.json")
         self.assertEqual(probe.audio_result_filename("video", "wav"), "flash_mp4.json")
         self.assertIn("flash_audio_mp3.json", probe.safe_prompt("audio", "mp3"))
+        self.assertIn("MP3 오디오", probe.safe_prompt("audio", "mp3"))
+        self.assertIn("WAV 오디오", probe.safe_prompt("audio", "wav"))
 
     def test_mp3_probe_is_dry_run_only_with_no_media_generation(self):
         with tempfile.TemporaryDirectory() as td:

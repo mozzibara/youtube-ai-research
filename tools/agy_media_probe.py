@@ -120,7 +120,7 @@ def sha256(path: Path) -> str:
 
 
 def safe_prompt(media_type: str, audio_format: str = "wav") -> str:
-    kind = "WAV 오디오" if media_type == "audio" else "MP4 동영상"
+    kind = ("MP3 오디오" if audio_format == "mp3" else "WAV 오디오") if media_type == "audio" else "MP4 동영상"
     seen = "attached_audio_seen" if media_type == "audio" else "attached_video_seen"
     result_file = audio_result_filename(media_type, audio_format)
     text = (
