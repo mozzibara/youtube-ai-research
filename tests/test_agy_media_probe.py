@@ -48,6 +48,50 @@ class AgymediaContractTests(unittest.TestCase):
             self.assertNotEqual(folder / probe.audio_result_filename("audio", "mp3"),
                                 folder / "flash_audio.json")
 
+    def test_audio_clipboard_submit_is_blocked_without_model_or_clipboard(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            workspace = folder / "agy_clean_workspace"
+            workspace.mkdir()
+            (workspace / "clip_00_30.mp4").write_bytes(b"synthetic fixture")
+            with patch.object(probe, "run_gui", side_effect=AssertionError("GUI must not start")):
+                with self.assertRaises(SystemExit) as stop:
+                    probe.main(["--run", str(folder), "--media-type", "audio",
+                                "--transport", "clipboard", "--submit"])
+                self.assertEqual(stop.exception.code, 2)
+
+    def test_file_read_prompt_requires_read_file_and_no_native_claim(self):
+        prompt = probe.safe_prompt("audio", "mp3", "file-read")
+        self.assertIn("read_file", prompt)
+        self.assertIn("clip_00_30.mp3", prompt)
+        self.assertIn("flash_audio_file_read_mp3.json", prompt)
+        self.assertIn("tool_read_file", prompt)
+        self.assertNotIn("native_multimodal", prompt)
+        self.assertEqual(probe.audio_result_filename("audio", "mp3", "file-read"),
+                         "flash_audio_file_read_mp3.json")
+        self.assertNotIn("\\n", prompt)
+
+    def test_file_read_result_rejects_missing_tool_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "probe.json"
+            obj = {"input": {"read_file_used": False, "audio_analyzed": True,
+                             "input_method": "tool_read_file"},
+                   "segments": [{"start": 0.0, "end": 2.0, "text": "가나다"}],
+                   "verdict": "AUDIO_TRANSCRIBED"}
+            path.write_text(json.dumps(obj), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                probe.validate_result(path, "audio", "file-read")
+            obj["input"]["read_file_used"] = True
+            path.write_text(json.dumps(obj), encoding="utf-8")
+            self.assertTrue(probe.validate_result(path, "audio", "file-read"))
+
+    def test_video_with_file_read_is_blocked(self):
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaises(SystemExit) as stop:
+                probe.main(["--run", td, "--media-type", "video",
+                            "--transport", "file-read", "--submit"])
+            self.assertEqual(stop.exception.code, 2)
+
     def test_video_prompt_is_distinct(self):
         text = probe.safe_prompt("video")
         self.assertIn("flash_mp4.json", text)
