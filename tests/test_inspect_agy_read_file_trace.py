@@ -74,7 +74,7 @@ class TraceTests(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "transcript_full.jsonl"
-            path.write_text("\\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
             report = mod.summarize(path, schema_preview=True)
         self.assertEqual(report["target_file_calls"], 1)
         self.assertEqual(len(report["schema_preview"]), 3)
