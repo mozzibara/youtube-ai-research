@@ -125,7 +125,7 @@ $brain = Join-Path $HOME ".gemini\antigravity-cli\brain"
 $found = @(Get-ChildItem -LiteralPath $brain -Recurse -File -Filter transcript_full.jsonl -ErrorAction SilentlyContinue | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch "flash_audio_file_read_mp3.json" -Quiet } | Sort-Object LastWriteTime -Descending)
 if ($found.Count -eq 0) { throw "Matching AGY transcript not found" }
 $trace = $found[0].FullName
-python .\tools\inspect_agy_read_file_trace.py --trace $trace --target clip_00_30.mp3
+python .\tools\inspect_agy_read_file_trace.py --trace $trace --target clip_00_30.mp3 --schema-preview
 ```
 
 This command **does not call a model or modify the original transcript**. It prints
@@ -142,3 +142,10 @@ understood by the model**, and lack of hints in serialized JSONL is not proof
 that no internal media transfer occurred. Ground-truth accuracy requires
 independent review of the original audio.
 
+
+The optional `--schema-preview` inspects field names and value types
+for the target call and up to four subsequent JSONL records. This helps determine
+whether tool results are serialized as a separate event instead of being embedded
+in the same `tool_calls` record. Unknown dictionary keys are replaced
+with a count; all actual field values, text, paths, media bytes and payloads
+remain excluded. A shape hint never constitutes proof of model audio reception.
