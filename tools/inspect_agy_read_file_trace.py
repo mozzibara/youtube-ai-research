@@ -140,6 +140,77 @@ def _preview_schema(path: Path, target_lines: list[int]) -> list[dict[str, Any]]
     return records
 
 
+# Only these fixed labels may appear in redacted output; never emit arbitrary values.
+KNOWN_STEP_TYPES = frozenset({
+    "USER_INPUT", "PLANNER_RESPONSE", "GENERIC", "VIEW_FILE",
+    "ERROR_MESSAGE", "RUN_COMMAND", "LIST_DIRECTORY", "GREP_SEARCH",
+    "CODE_ACTION", "CONVERSATION_HISTORY", "CHECKPOINT", "SYSTEM_MESSAGE",
+})
+KNOWN_SOURCES = frozenset({"USER_EXPLICIT", "MODEL", "SYSTEM", "TOOL"})
+
+
+def _safe_label(value: Any, known: frozenset[str]) -> str:
+    return value if isinstance(value, str) and value in known else "OTHER"
+
+
+def _linked_result_candidates(path: Path, calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Identify adjacent typed result records, not binary transport or audio access."""
+    target_calls = [c for c in calls if c["target_in_call_arguments"]
+                    and isinstance(c.get("step"), int)]
+    if not target_calls:
+        return []
+    expected = {c["step"] + 1 for c in target_calls}
+    rows: dict[int, dict[str, Any]] = {}
+    with path.open("r", encoding="utf-8-sig") as stream:
+        for line in stream:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            step = obj.get("step_index")
+            if type(step) is not int or step not in expected:
+                continue
+            raw_type = obj.get("type")
+            content = obj.get("content")
+            type_label = _safe_label(raw_type, KNOWN_STEP_TYPES)
+            rows[step] = {
+                "step": step,
+                "event_type": type_label,
+                "event_source": _safe_label(obj.get("source"), KNOWN_SOURCES),
+                "status": _safe_label(obj.get("status"),
+                                      frozenset({"DONE", "RUNNING", "FAILED", "ERROR"})),
+                "content_is_string": isinstance(content, str),
+                "content_character_count": len(content) if isinstance(content, str)
+                                           else None,
+                "audio_mime_text_hint": bool(
+                    isinstance(content, str) and
+                    any(x in content.lower() for x in
+                        ("audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav",
+                         "audio/flac", "audio/aac", "audio/ogg", "audio/mp4"))),
+                "candidate_tool_result": type_label in {
+                    "GENERIC", "VIEW_FILE", "ERROR_MESSAGE"},
+            }
+    report = []
+    for call in target_calls:
+        candidate = rows.get(call["step"] + 1)
+        report.append({
+            "call_step": call["step"],
+            "call_status": call["status"],
+            "next_step_present": candidate is not None,
+            "next_step": candidate,
+            "correlation_basis": (
+                "ADJACENT_STEP_WITH_TOOL_RESULT_TYPE_CANDIDATE"
+                if candidate and candidate["candidate_tool_result"] else
+                "ADJACENT_STEP_ONLY_NOT_CLASSIFIED" if candidate else
+                "NO_ADJACENT_STEP"
+            ),
+            "independent_audio_receipt_verified": False,
+        })
+    return report
+
+
 def summarize(path: Path, target: str = "clip_00_30.mp3",
               schema_preview: bool = False) -> dict[str, Any]:
     if not target or "/" in target or "\\" in target or target in {".", ".."}:
@@ -190,6 +261,11 @@ def summarize(path: Path, target: str = "clip_00_30.mp3",
         "limitations": "Metadata only: no audio playback or independent model payload verification.",
     }
     if schema_preview:
+        report["adjacent_result_candidates"] = _linked_result_candidates(path, calls)
+        report["adjacent_result_note"] = (
+            "Type and adjacency are circumstantial evidence of a tool response; "
+            "content is never printed and audio receipt remains unverified."
+        )
         target_lines = [c["line"] for c in calls if c["target_in_call_arguments"]]
         report["schema_preview"] = _preview_schema(path, target_lines)
         report["schema_preview_note"] = (
