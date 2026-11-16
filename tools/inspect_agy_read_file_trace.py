@@ -84,7 +84,64 @@ def _result_metadata(results: list[Any]) -> dict[str, bool]:
             "inline_payload_hint": inline_payload_hint}
 
 
-def summarize(path: Path, target: str = "clip_00_30.mp3") -> dict[str, Any]:
+# Fixed structural vocabulary; dynamic dictionary keys and string values are never emitted.
+SCHEMA_FIELDS = frozenset({
+    "step_index", "status", "tool_calls", "tool_results", "tool_responses",
+    "tool_outputs", "tool_result", "result", "message", "messages",
+    "content", "role", "type", "event_type", "output", "response",
+    "tool_call_id", "tool_use_id", "name", "tool_name", "function",
+    "arguments", "args", "input", "parameters", "parts", "inline_data",
+    "inlineData", "mime_type", "mimeType", "data", "text",
+    "file_path", "path", "success", "error",
+})
+
+
+def _shape(value: Any, depth: int = 0) -> dict[str, Any]:
+    if depth >= 5:
+        return {"type": type(value).__name__, "truncated": True}
+    if isinstance(value, dict):
+        selected = {key: _shape(item, depth + 1)
+                    for key, item in value.items() if key in SCHEMA_FIELDS}
+        # Never print unrecognized keys; they may contain user paths or identifiers.
+        return {"type": "object", "fields": selected,
+                "unrecognized_key_count": len(value) - len(selected)}
+    if isinstance(value, list):
+        return {"type": "array", "count": len(value),
+                "first_element_shape": _shape(value[0], depth + 1)
+                if value else None}
+    return {"type": "null" if value is None else
+            "boolean" if isinstance(value, bool) else
+            "number" if isinstance(value, (int, float)) else
+            "string" if isinstance(value, str) else "other"}
+
+
+def _preview_schema(path: Path, target_lines: list[int]) -> list[dict[str, Any]]:
+    """Return structure, never values, for records around a targeted tool call."""
+    if not target_lines:
+        return []
+    first = target_lines[0]
+    lower, upper = max(1, first - 1), first + 4
+    records = []
+    with path.open("r", encoding="utf-8-sig") as stream:
+        for i, line in enumerate(stream, 1):
+            if i < lower:
+                continue
+            if i > upper:
+                break
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                records.append({"line": i, "unparseable": True})
+                continue
+            if isinstance(record, dict):
+                records.append({"line": i, "step": record.get("step_index")
+                                if isinstance(record.get("step_index"), int) else None,
+                                "structure": _shape(record)})
+    return records
+
+
+def summarize(path: Path, target: str = "clip_00_30.mp3",
+              schema_preview: bool = False) -> dict[str, Any]:
     if not target or "/" in target or "\\" in target or target in {".", ".."}:
         raise ValueError("target must be a filename, not a path")
     calls = []
@@ -119,7 +176,7 @@ def summarize(path: Path, target: str = "clip_00_30.mp3") -> dict[str, Any]:
                     **_result_metadata(results),
                 })
     target_count = sum(1 for c in calls if c["target_in_call_arguments"])
-    return {
+    report = {
         "schema": "agy_read_file_trace_metadata_v1",
         "target_basename": target,
         "read_file_calls": len(calls),
@@ -132,6 +189,14 @@ def summarize(path: Path, target: str = "clip_00_30.mp3") -> dict[str, Any]:
                        else "NO_READ_FILE_CALL_OBSERVED"),
         "limitations": "Metadata only: no audio playback or independent model payload verification.",
     }
+    if schema_preview:
+        target_lines = [c["line"] for c in calls if c["target_in_call_arguments"]]
+        report["schema_preview"] = _preview_schema(path, target_lines)
+        report["schema_preview_note"] = (
+            "Field names and value types only; no tool returns or audio bytes shown. "
+            "Nearby records are not verified to be tool-result events."
+        )
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -139,8 +204,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace", required=True, type=Path)
     parser.add_argument("--target", default="clip_00_30.mp3")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--schema-preview", action="store_true",
+                        help="Print only field names/types for target call and next records")
     args = parser.parse_args(argv)
-    report = json.dumps(summarize(args.trace, args.target), ensure_ascii=False, indent=2)
+    report = json.dumps(summarize(args.trace, args.target, args.schema_preview),
+                        ensure_ascii=False, indent=2)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(report + "\n", encoding="utf-8")
