@@ -21,6 +21,31 @@ class AgymediaContractTests(unittest.TestCase):
         self.assertIn("native_multimodal_audio_attachment", text)
         self.assertNotIn("https://", text)
 
+    def test_mp3_prompt_and_result_are_separate_from_wav(self):
+        self.assertEqual(probe.audio_result_filename("audio", "wav"), "flash_audio.json")
+        self.assertEqual(probe.audio_result_filename("audio", "mp3"), "flash_audio_mp3.json")
+        self.assertEqual(probe.audio_result_filename("video", "wav"), "flash_mp4.json")
+        self.assertIn("flash_audio_mp3.json", probe.safe_prompt("audio", "mp3"))
+
+    def test_mp3_probe_is_dry_run_only_with_no_media_generation(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            workspace = folder / "agy_clean_workspace"
+            workspace.mkdir()
+            (workspace / "clip_00_30.mp4").write_bytes(b"synthetic fixture")
+            with patch.object(probe, "prepare_mp3", side_effect=AssertionError("not dry")):
+                self.assertEqual(probe.main(["--run", str(folder),
+                                             "--media-type", "audio",
+                                             "--audio-format", "mp3",
+                                             "--dry-run"]), 0)
+
+    def test_mp3_audio_is_kept_separate_from_previous_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            (folder / "flash_audio.json").write_text('{"verdict":"NO_AUDIO_ACCESS"}')
+            self.assertNotEqual(folder / probe.audio_result_filename("audio", "mp3"),
+                                folder / "flash_audio.json")
+
     def test_video_prompt_is_distinct(self):
         text = probe.safe_prompt("video")
         self.assertIn("flash_mp4.json", text)
