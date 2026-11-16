@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Run,
     [ValidateSet("audio", "video")][string]$MediaType = "audio",
+    [ValidateSet("wav", "mp3")][string]$AudioFormat = "wav",
     [switch]$Submit,
     [switch]$DryRun,
     [int]$StartupSeconds = 90,
@@ -11,7 +12,7 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).ProviderPath
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) { throw "Missing venv python" }
 $cmd = @((Join-Path $root "tools\agy_media_probe.py"),
-    "--run", $Run, "--media-type", $MediaType,
+    "--run", $Run, "--media-type", $MediaType, "--audio-format", $AudioFormat,
     "--startup-seconds", "$StartupSeconds",
     "--timeout-seconds", "$TimeoutSeconds")
 if ($DryRun) { $cmd += "--dry-run" }

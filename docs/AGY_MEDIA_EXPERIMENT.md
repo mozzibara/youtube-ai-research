@@ -33,6 +33,24 @@ $run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -Submit
 ```
 
+### WAV versus MP3 attachment diagnostic
+
+A real Windows run reported `NO_AUDIO_ACCESS` and `attached_audio_seen=false` with a WAV clipboard file drop. **This does not prove the model cannot process audio:** the AGY TUI may simply have failed to attach that file. The `--attachment-probe` mode ends before submitting to the model, so use it first. Check the AGY prompt for a real `audio/*` media indicator; successful `CF_HDROP` registration is not sufficient.
+
+To compare a compressed, standard audio format without overwriting the WAV failure record:
+
+```powershell
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3 -DryRun
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3
+# Do NOT use -Submit if AGY does not display a native audio attachment.
+# After verifying the attachment in the interactive AGY window, close it and:
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3 -Submit
+```
+
+MP3 is generated locally from the exact same prepared MP4; its model output is stored in `flash_audio_mp3.json` (not `flash_audio.json`) and the attempt status in `automation_status_audio_mp3.json`. Neither WAV nor MP3 has yet been proven to reach the Gemini model in this Windows AGY route. The source-only code's `--submit` mode cannot independently validate the binary transport; use it only when the native audio attachment is visibly present.
+
+**Do not use `@clip_00_30.wav` to claim native multimodal transport.** AGY's `@` file mention passes a file path for an agent to read; it is a different transport contract from native audio media attachment.
+
 The default mode is audio-only. The script derives a mono 16kHz PCM WAV from the prepared MP4 and validates length and codec. Use `-MediaType video` only when specifically testing MP4, because a previous native MP4 run reported `NO_AUDIO_ACCESS`.
 
 To avoid stale success attribution, the runner will **not overwrite** `flash_audio.json` or `flash_mp4.json`. Archive earlier results before conducting a new run.
