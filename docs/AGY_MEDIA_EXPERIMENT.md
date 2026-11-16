@@ -112,3 +112,33 @@ python -m unittest discover -s tests -p test_agy_media_probe.py -v
 ```
 
 The offline tests use only synthetic data. CI does not open an AGY session, contact YouTube, or perform a real multimodal model call.
+
+### Independently inspect AGY read_file calls without publishing the transcript
+
+After a local `-Transport file-read -Submit` experiment, search AGY's
+conversation transcript under `~.geminiantigravity-clirain` for
+the relevant result filename, then pass the matching `transcript_full.jsonl`
+to the offline inspector:
+
+```powershell
+$brain = Join-Path $HOME ".gemini\antigravity-cli\brain"
+$found = @(Get-ChildItem -LiteralPath $brain -Recurse -File -Filter transcript_full.jsonl -ErrorAction SilentlyContinue | Where-Object { Select-String -LiteralPath $_.FullName -SimpleMatch "flash_audio_file_read_mp3.json" -Quiet } | Sort-Object LastWriteTime -Descending)
+if ($found.Count -eq 0) { throw "Matching AGY transcript not found" }
+$trace = $found[0].FullName
+python .\tools\inspect_agy_read_file_trace.py --trace $trace --target clip_00_30.mp3
+```
+
+This command **does not call a model or modify the original transcript**. It prints
+only the tool-call step number and tool name, whether the *arguments* contain
+the target basename, whether a tool-result record appears at that step, and
+whether a structural MIME/payload *hint* was present. It never prints raw
+arguments, private paths, audio bytes, model transcripts or full tool returns.
+
+Interpretation is deliberately conservative: `DONE` only proves
+the tool invocation completed. `target_file_calls > 0` proves the target
+filename appeared in one call's arguments. `audio_mime_hint` and
+`inline_payload_hint` **still do not establish audio reached or was
+understood by the model**, and lack of hints in serialized JSONL is not proof
+that no internal media transfer occurred. Ground-truth accuracy requires
+independent review of the original audio.
+
