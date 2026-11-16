@@ -23,17 +23,23 @@ RESULT_NAMES = {"audio": "flash_audio.json", "video": "flash_mp4.json"}
 HERE = Path(__file__).resolve().parent
 
 
-def validate_result(path: Path, media_type: str) -> dict:
+def validate_result(path: Path, media_type: str, transport: str = "clipboard") -> dict:
     result = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(result, dict) or result.get("verdict") != "AUDIO_TRANSCRIBED":
         raise ValueError("No validated audio transcription; verdict=" + str(
             result.get("verdict") if isinstance(result, dict) else "INVALID"))
     info = result.get("input", {})
-    expected = "attached_audio_seen" if media_type == "audio" else "attached_video_seen"
-    if info.get(expected) is not True or info.get("audio_analyzed") is not True:
-        raise ValueError("Model did not report audio access")
-    if info.get("input_method") != f"native_multimodal_{media_type}_attachment":
-        raise ValueError("Unexpected input method")
+    if transport == "file-read":
+        if media_type != "audio" or info.get("input_method") != "tool_read_file" \
+                or info.get("read_file_used") is not True \
+                or info.get("audio_analyzed") is not True:
+            raise ValueError("Model did not report audio read through read_file tool")
+    else:
+        expected = "attached_audio_seen" if media_type == "audio" else "attached_video_seen"
+        if info.get(expected) is not True or info.get("audio_analyzed") is not True:
+            raise ValueError("Model did not report audio access")
+        if info.get("input_method") != f"native_multimodal_{media_type}_attachment":
+            raise ValueError("Unexpected input method")
     segments = result.get("segments")
     if not isinstance(segments, list) or not segments:
         raise ValueError("No speech segments")
@@ -108,9 +114,12 @@ def prepare_mp3(mp4: Path, mp3: Path) -> dict:
         tmp.unlink(missing_ok=True)
 
 
-def audio_result_filename(media_type: str, audio_format: str) -> str:
+def audio_result_filename(media_type: str, audio_format: str,
+                          transport: str = "clipboard") -> str:
     if media_type == "video":
         return "flash_mp4.json"
+    if transport == "file-read":
+        return "flash_audio_file_read_mp3.json" if audio_format == "mp3" else "flash_audio_file_read_wav.json"
     return "flash_audio_mp3.json" if audio_format == "mp3" else "flash_audio.json"
 
 
@@ -119,7 +128,33 @@ def sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def safe_prompt(media_type: str, audio_format: str = "wav") -> str:
+def safe_prompt(media_type: str, audio_format: str = "wav",
+                transport: str = "clipboard") -> str:
+    if transport == "file-read":
+        if media_type != "audio":
+            raise ValueError("file-read mode currently supports audio only")
+        filename = "clip_00_30." + audio_format
+        output = audio_result_filename(media_type, audio_format, transport)
+        prompt = (
+            f"작업 디렉터리의 {filename} 오디오 파일을 실제로 분석해 한국어 발화를 "
+            "0초부터 30초까지 타임스탬프 포함하여 정확히 전사하세요. "
+            "반드시 에이전트의 read_file 도구를 사용해 해당 오디오 파일을 직접 읽어 보세요. "
+            "단순히 파일명을 확인하거나 경로만 받은 것은 음성을 들은 것이 아닙니다. "
+            "URL, 브라우저, 유튜브 자막, 다른 파일, 로컬 음성인식 프로그램 또는 "
+            "별도 명령 실행으로 발화를 추정하지 마세요. 도구가 음성 데이터 대신 "
+            "텍스트나 메타데이터만 반환하면 NO_AUDIO_ACCESS로 보고하고 문장을 만들어내지 마세요. "
+            f"현재 폴더에 {output} 파일을 UTF-8 JSON으로 작성하세요. "
+            '스키마: {"input":{"read_file_used":true,"audio_analyzed":true,'
+            '"input_method":"tool_read_file","limitations":[]},'
+            '"segments":[{"start":0.0,"end":2.0,"text":"실제 들은 발화"}],'
+            '"uncertainties":[],"verdict":"AUDIO_TRANSCRIBED"}. '
+            "이 문장은 형식 예시이며 실제 발화가 아닙니다. "
+            '접근 실패면 "audio_analyzed":false, "segments":[], '
+            '"verdict":"NO_AUDIO_ACCESS"를 쓰세요. '
+            "출력 본문에도 JSON을 표시하고, 사용한 read_file 도구 결과의 "
+            "종류를 요약하세요."
+        )
+        return re.sub(r"\s+", " ", prompt).strip()
     kind = ("MP3 오디오" if audio_format == "mp3" else "WAV 오디오") if media_type == "audio" else "MP4 동영상"
     seen = "attached_audio_seen" if media_type == "audio" else "attached_video_seen"
     result_file = audio_result_filename(media_type, audio_format)
@@ -248,11 +283,29 @@ def run_gui(workspace: Path, media: Path, kind: str, args) -> dict:
     time.sleep(args.ready_delay_seconds)
     focus(pg, hwnd)
     before_pic = screenshot(pg, workspace, "gui_01_ready")
-    pyperclip.copy(safe_prompt(kind, args.audio_format))
+    pyperclip.copy(safe_prompt(kind, args.audio_format, args.transport))
     pg.hotkey("ctrl", "v", interval=.1)
     time.sleep(2)
     focus(pg, hwnd)
     prompt_pic = screenshot(pg, workspace, "gui_02_prompt")
+    if args.transport == "file-read":
+        focus(pg, hwnd)
+        stage = screenshot(pg, workspace, "gui_03_file_read_prompt")
+        evidence = {"launcher": str(marker), "media": str(media),
+                    "media_sha256": sha256(media), "transport": "file-read",
+                    "window_title": title, "screenshots": [before_pic, prompt_pic, stage],
+                    "clipboard_file_drop_ready": False, "native_payload_confirmed": False,
+                    "tool_read_observed_independently": False,
+                    "note": "File path prompt is not a native attachment; read_file audio support unverified"}
+        if args.attachment_probe:
+            evidence["status"] = "FILE_READ_PROMPT_STAGED_NO_SUBMISSION"
+            return evidence
+        focus(pg, hwnd)
+        pg.press("enter")
+        time.sleep(3)
+        evidence["screenshots"].append(screenshot(pg, workspace, "gui_04_submitted"))
+        evidence["status"] = "FILE_READ_PROMPT_SUBMITTED_UNVERIFIED"
+        return evidence
     helper = HERE / "agy_media_file_drop.ps1"
     proc = subprocess.run(["powershell.exe", "-NoLogo", "-NoProfile", "-STA",
                            "-ExecutionPolicy", "Bypass", "-File", str(helper),
@@ -285,7 +338,8 @@ def run_gui(workspace: Path, media: Path, kind: str, args) -> dict:
     return evidence
 
 
-def wait_result(path: Path, media_type: str, timeout: int):
+def wait_result(path: Path, media_type: str, timeout: int,
+                transport: str = "clipboard"):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if path.exists():
@@ -295,7 +349,7 @@ def wait_result(path: Path, media_type: str, timeout: int):
                     "NO_AUDIO_ACCESS", "NO_AUDIO_ATTACHED", "UNSUPPORTED_AUDIO_FORMAT"
                 }:
                     raise RuntimeError("AGY reported " + obj["verdict"])
-                return validate_result(path, media_type)
+                return validate_result(path, media_type, transport)
             except (ValueError, json.JSONDecodeError):
                 pass
         time.sleep(2)
@@ -306,7 +360,8 @@ def normalized(text: str) -> str:
     return "".join(re.findall(r"[가-힣a-z0-9]", text.lower()))
 
 
-def compare_references(run: Path, model_result: dict, media_type: str):
+def compare_references(run: Path, model_result: dict, media_type: str,
+                       transport: str = "clipboard", audio_format: str = "wav"):
     refs = run / "references"
     a = refs / "auto_ko_00_30.json"
     b = refs / "manual_ko_00_30.json"
@@ -330,7 +385,8 @@ def compare_references(run: Path, model_result: dict, media_type: str):
         "flash_manual": SequenceMatcher(None, normalized(texts["flash"]),
                                        normalized(texts["manual"]), autojunk=False).ratio(),
     }
-    suffix = "_audio" if media_type == "audio" else ""
+    suffix = (f"_audio_file_read_{audio_format}" if transport == "file-read" else
+              "_audio" if media_type == "audio" else "")
     report = {"text_similarity_not_accuracy": ratios,
               "media_type": media_type, "human_audio_ground_truth_verified": False}
     (run / f"comparison{suffix}.json").write_text(
@@ -342,6 +398,9 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Experimental AGY native MP4/WAV attachment")
     parser.add_argument("--run", type=Path, required=True, help="Local runtime directory")
     parser.add_argument("--media-type", choices=["audio", "video"], default="audio")
+    parser.add_argument("--transport", choices=["clipboard", "file-read"],
+                        default="clipboard",
+                        help="Clipboard accepts image/video only; file-read is experimental audio tool input")
     parser.add_argument("--audio-format", choices=["wav", "mp3"], default="wav",
                         help="Choose WAV or MP3 clipboard attachment probe")
     parser.add_argument("--dry-run", action="store_true")
@@ -355,6 +414,12 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.submit == args.attachment_probe and not args.dry_run:
         parser.error("Choose exactly one of --attachment-probe or --submit")
+    if args.transport == "file-read" and args.media_type != "audio":
+        parser.error("file-read transport is only supported for audio experiments")
+    if args.media_type == "audio" and args.transport == "clipboard" and args.submit:
+        parser.error("AUDIO_CLIPBOARD_UNSUPPORTED: AGY 1.5.9 Alt+V reports 'No image or video found'. "
+                     "Use --transport file-read for a separate tool-based experiment; "
+                     "file-read is NOT a native media attachment.")
     run = args.run.resolve()
     workspace = run / "agy_clean_workspace"
     mp4 = workspace / "clip_00_30.mp4"
@@ -362,10 +427,14 @@ def main(argv=None) -> int:
         raise FileNotFoundError(mp4)
     media = (workspace / ("clip_00_30." + args.audio_format)
              if args.media_type == "audio" else mp4)
-    result_path = workspace / audio_result_filename(args.media_type, args.audio_format)
-    status_path = run / (("automation_status_audio_mp3.json" if args.audio_format == "mp3"
-                          else "automation_status_audio.json") if args.media_type == "audio"
-                         else "automation_status.json")
+    result_path = workspace / audio_result_filename(args.media_type, args.audio_format,
+                                                     args.transport)
+    status_path = run / (
+        ("automation_status_audio_file_read_" + args.audio_format + ".json")
+        if args.transport == "file-read" else
+        ("automation_status_audio_mp3.json" if args.audio_format == "mp3"
+         else "automation_status_audio.json") if args.media_type == "audio" else
+        "automation_status.json")
     if args.dry_run:
         print("DRY_RUN:", {"run": str(run), "media_type": args.media_type,
                            "model": MODEL, "video_exists": True})
@@ -386,9 +455,11 @@ def main(argv=None) -> int:
         if args.attachment_probe:
             print("STAGED_NO_SUBMISSION:", evidence["screenshots"][-1])
             return 0
-        result = wait_result(result_path, args.media_type, args.timeout_seconds)
-        comparison = compare_references(run, result, args.media_type)
-        evidence["status"] = "MODEL_SELF_REPORTED_AUDIO_TRANSCRIBED"
+        result = wait_result(result_path, args.media_type, args.timeout_seconds,
+                             args.transport)
+        comparison = compare_references(run, result, args.media_type,
+                                        args.transport, args.audio_format)
+        evidence["status"] = "MODEL_SELF_REPORTED_AUDIO_TRANSCRIBED_UNVERIFIED"
         evidence["comparison_created"] = comparison is not None
         print("TRANSCRIPTION_SELF_REPORTED:", result_path)
         return 0
