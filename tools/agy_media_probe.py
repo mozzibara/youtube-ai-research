@@ -75,15 +75,54 @@ def prepare_wav(mp4: Path, wav: Path) -> dict:
         tmp.unlink(missing_ok=True)
 
 
+
+def prepare_mp3(mp4: Path, mp3: Path) -> dict:
+    """Produce a small 30-second mono MP3 for a separate clipboard capability probe."""
+    if not mp4.is_file():
+        raise FileNotFoundError(mp4)
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise FileNotFoundError("ffmpeg and ffprobe must be on PATH")
+    mp3.parent.mkdir(parents=True, exist_ok=True)
+    tmp = mp3.with_suffix(".pending.mp3")
+    try:
+        subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                        "-y", "-i", str(mp4), "-map", "0:a:0", "-vn", "-t", "30",
+                        "-c:a", "libmp3lame", "-b:a", "96k",
+                        "-ar", "16000", "-ac", "1", str(tmp)],
+                       check=True, capture_output=True, timeout=90)
+        probed = subprocess.run(["ffprobe", "-v", "error", "-of", "json",
+                                "-show_entries", "stream=codec_name,sample_rate,channels:format=duration",
+                                str(tmp)], check=True, capture_output=True,
+                               text=True, timeout=15)
+        spec = json.loads(probed.stdout)
+        streams = spec["streams"]
+        duration = float(spec["format"]["duration"])
+        if len(streams) != 1 or streams[0]["codec_name"] != "mp3" \
+                or int(streams[0]["sample_rate"]) != 16000 \
+                or int(streams[0]["channels"]) != 1 \
+                or not 29 <= duration <= 30.5:
+            raise ValueError("Invalid 30-second MP3 extraction")
+        tmp.replace(mp3)
+        return {"path": str(mp3), "duration": duration, "codec": "mp3", "sha256": sha256(mp3)}
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def audio_result_filename(media_type: str, audio_format: str) -> str:
+    if media_type == "video":
+        return "flash_mp4.json"
+    return "flash_audio_mp3.json" if audio_format == "mp3" else "flash_audio.json"
+
+
 def sha256(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def safe_prompt(media_type: str) -> str:
+def safe_prompt(media_type: str, audio_format: str = "wav") -> str:
     kind = "WAV 오디오" if media_type == "audio" else "MP4 동영상"
     seen = "attached_audio_seen" if media_type == "audio" else "attached_video_seen"
-    result_file = RESULT_NAMES[media_type]
+    result_file = audio_result_filename(media_type, audio_format)
     text = (
         f"이 요청에는 실제 {kind} 파일이 네이티브 첨부돼 있어야 합니다. "
         "오직 첨부 파일의 실제 오디오를 듣고 00:00부터 00:30까지 한국어 발화를 "
@@ -209,7 +248,7 @@ def run_gui(workspace: Path, media: Path, kind: str, args) -> dict:
     time.sleep(args.ready_delay_seconds)
     focus(pg, hwnd)
     before_pic = screenshot(pg, workspace, "gui_01_ready")
-    pyperclip.copy(safe_prompt(kind))
+    pyperclip.copy(safe_prompt(kind, args.audio_format))
     pg.hotkey("ctrl", "v", interval=.1)
     time.sleep(2)
     focus(pg, hwnd)
@@ -231,6 +270,7 @@ def run_gui(workspace: Path, media: Path, kind: str, args) -> dict:
                 "media_sha256": sha256(media),
                 "window_title": title, "screenshots": [before_pic, prompt_pic, attach_pic],
                 "clipboard_file_drop_ready": True,
+                "media_format": media.suffix.lstrip("."),
                 "native_payload_confirmed": False,
                 "note": "UI screenshot and model self-report are not independent transport proof"}
     if args.attachment_probe:
@@ -302,6 +342,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Experimental AGY native MP4/WAV attachment")
     parser.add_argument("--run", type=Path, required=True, help="Local runtime directory")
     parser.add_argument("--media-type", choices=["audio", "video"], default="audio")
+    parser.add_argument("--audio-format", choices=["wav", "mp3"], default="wav",
+                        help="Choose WAV or MP3 clipboard attachment probe")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--attachment-probe", action="store_true",
                         help="Stage media; do not submit or call the model")
@@ -318,9 +360,11 @@ def main(argv=None) -> int:
     mp4 = workspace / "clip_00_30.mp4"
     if not mp4.is_file():
         raise FileNotFoundError(mp4)
-    media = workspace / "clip_00_30.wav" if args.media_type == "audio" else mp4
-    result_path = workspace / RESULT_NAMES[args.media_type]
-    status_path = run / ("automation_status_audio.json" if args.media_type == "audio"
+    media = (workspace / ("clip_00_30." + args.audio_format)
+             if args.media_type == "audio" else mp4)
+    result_path = workspace / audio_result_filename(args.media_type, args.audio_format)
+    status_path = run / (("automation_status_audio_mp3.json" if args.audio_format == "mp3"
+                          else "automation_status_audio.json") if args.media_type == "audio"
                          else "automation_status.json")
     if args.dry_run:
         print("DRY_RUN:", {"run": str(run), "media_type": args.media_type,
@@ -329,10 +373,14 @@ def main(argv=None) -> int:
     if result_path.exists():
         raise FileExistsError(f"Existing result must be archived, not overwritten: {result_path}")
     if args.media_type == "audio":
-        manifest = prepare_wav(mp4, media)
-        (run / "audio_manifest.json").write_text(
+        manifest = (prepare_wav(mp4, media) if args.audio_format == "wav"
+                    else prepare_mp3(mp4, media))
+        (run / ("audio_manifest_mp3.json" if args.audio_format == "mp3"
+                else "audio_manifest.json")).write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    evidence = {}
+    evidence = {"audio_format": args.audio_format,
+                "media_type": args.media_type,
+                "attachment_transport_verified": False}
     try:
         evidence = run_gui(workspace, media, args.media_type, args)
         if args.attachment_probe:
