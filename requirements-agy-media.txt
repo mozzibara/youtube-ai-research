@@ -1,0 +1,4 @@
+# Optional Windows-only AGY TUI automation. AGY CLI and FFmpeg are installed separately.
+pyautogui>=0.9.54,<1
+pyperclip>=1.11,<2
+pygetwindow>=0.0.9,<1
