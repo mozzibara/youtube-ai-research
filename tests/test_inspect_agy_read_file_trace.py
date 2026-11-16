@@ -87,6 +87,64 @@ class TraceTests(unittest.TestCase):
         self.assertNotIn("PRIVATE_AUDIO_CONTENT", p)
         self.assertFalse(report["independent_audio_receipt_verified"])
 
+    def test_step_two_generic_tool_return_is_correlated_without_leaking(self):
+        rows = [
+            {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE",
+             "status": "DONE", "tool_calls": [
+                 {"name": "read_file", "args": {"file_path": "clip_00_30.mp3"}}]},
+            {"step_index": 2, "source": "SYSTEM", "type": "GENERIC",
+             "status": "DONE",
+             "content": "PRIVATE_OUTPUT_CONTENT audio/mpeg TOKEN_NOT_FOR_PUBLICATION"},
+            {"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE",
+             "tool_calls": [{"name": "read_file", "args": {"file_path": "result.json"}}]},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "transcript_full.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            report = mod.summarize(path, schema_preview=True)
+        linked = report["adjacent_result_candidates"]
+        self.assertEqual(len(linked), 1)
+        self.assertTrue(linked[0]["next_step_present"])
+        self.assertEqual(linked[0]["next_step"]["event_type"], "GENERIC")
+        self.assertTrue(linked[0]["next_step"]["candidate_tool_result"])
+        self.assertTrue(linked[0]["next_step"]["audio_mime_text_hint"])
+        self.assertFalse(linked[0]["independent_audio_receipt_verified"])
+        self.assertNotIn("PRIVATE_OUTPUT_CONTENT", json.dumps(report))
+        self.assertNotIn("TOKEN_NOT_FOR_PUBLICATION", json.dumps(report))
+        self.assertFalse(report["independent_audio_receipt_verified"])
+
+    def test_adjacent_planner_response_is_not_tool_return(self):
+        rows = [
+            {"step_index": 1, "tool_calls": [
+                {"name": "read_file", "args": {"file_path": "clip_00_30.mp3"}}]},
+            {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE",
+             "content": "Private model answer, not a tool return"},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "transcript_full.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            report = mod.summarize(path, schema_preview=True)
+        linked = report["adjacent_result_candidates"][0]
+        self.assertEqual(linked["correlation_basis"], "ADJACENT_STEP_ONLY_NOT_CLASSIFIED")
+        self.assertFalse(linked["next_step"]["candidate_tool_result"])
+
+    def test_unknown_event_type_and_source_values_are_redacted(self):
+        rows = [
+            {"step_index": 1, "tool_calls": [
+                {"name": "read_file", "args": {"file_path": "clip_00_30.mp3"}}]},
+            {"step_index": 2, "type": "PRIVATE_DYNAMIC_TYPE", "source": "PRIVATE_ACTOR",
+             "content": "secret"},
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "transcript_full.jsonl"
+            path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+            report = mod.summarize(path, schema_preview=True)
+        linked = report["adjacent_result_candidates"][0]["next_step"]
+        self.assertEqual(linked["event_type"], "OTHER")
+        self.assertEqual(linked["event_source"], "OTHER")
+        self.assertNotIn("PRIVATE_DYNAMIC_TYPE", json.dumps(report))
+        self.assertNotIn("PRIVATE_ACTOR", json.dumps(report))
+
     def test_schema_preview_without_target_is_empty(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "log.jsonl"
