@@ -33,6 +33,46 @@ $run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -Submit
 ```
 
+### Critical finding: audio clipboard paste is not supported by this CLI path
+
+Observed on Windows AGY CLI 1.5.9: both WAV and MP3 passed the local
+`CF_HDROP` clipboard registration check, but the CLI showed
+`No image or video found in the clipboard`. The CLI's documented paste
+formats cover images and videos, not direct audio clipboard pastes.
+A native MP4 media chip appeared on an earlier attempt, but the model
+reported that it could not access its audio track.
+
+For this reason, **`-MediaType audio -Transport clipboard -Submit` is
+blocked before launching AGY**, rather than spending tokens on another
+predictable `NO_AUDIO_ACCESS`. The old `-MediaType audio` default
+attachment-probe remains usable solely for diagnostic reproduction.
+
+### Separate experimental path: AGY read_file tool
+
+The CLI documentation describes `@filename` as sending the file path
+to the agent, **not attaching its bytes**. As a separate hypothesis,
+the tool-use route may allow the agent's `read_file` operation to
+return audio to the model. This route is unverified on the local
+Windows environment; it is **not** a native attachment and its result
+must be treated as a model self-report until the tool trajectory and
+original audio have been independently examined.
+
+```powershell
+$run = "D:\local-runtime\agy-experiments\sample-30s"
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3 -Transport file-read -DryRun
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3 -Transport file-read
+# Close the staging window, review the staged text, then explicitly opt in:
+.\scripts\run-agy-media.ps1 -Run $run -MediaType audio -AudioFormat mp3 -Transport file-read -Submit
+```
+
+Tool-read output (if any) is isolated at
+`flash_audio_file_read_mp3.json`, and status is
+`automation_status_audio_file_read_mp3.json`. If a
+`read_file` operation returns metadata rather than audio, the only
+correct outcome is `NO_AUDIO_ACCESS`. Do not turn this output into a
+ground-truth transcription without checking actual audio access.
+Only run `-Submit` after the preceding non-submitting probe.
+
 ### WAV versus MP3 attachment diagnostic
 
 A real Windows run reported `NO_AUDIO_ACCESS` and `attached_audio_seen=false` with a WAV clipboard file drop. **This does not prove the model cannot process audio:** the AGY TUI may simply have failed to attach that file. The `--attachment-probe` mode ends before submitting to the model, so use it first. Check the AGY prompt for a real `audio/*` media indicator; successful `CF_HDROP` registration is not sufficient.
