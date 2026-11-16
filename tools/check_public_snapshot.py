@@ -34,6 +34,7 @@ ALLOW_EXACT = {
     "tools/compare_multimodal_runs.py",
     "tools/check_public_snapshot.py",
     "tools/agy_media_probe.py",
+    "tools/inspect_agy_read_file_trace.py",
     "tools/agy_media_file_drop.ps1",
     "scripts/setup-agy-media.ps1",
     "scripts/run-agy-media.ps1",
