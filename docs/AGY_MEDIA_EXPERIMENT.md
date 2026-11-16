@@ -149,3 +149,21 @@ whether tool results are serialized as a separate event instead of being embedde
 in the same `tool_calls` record. Unknown dictionary keys are replaced
 with a count; all actual field values, text, paths, media bytes and payloads
 remain excluded. A shape hint never constitutes proof of model audio reception.
+
+
+### Tool call -> adjacent result step correlation
+
+The `--schema-preview` mode also emits `adjacent_result_candidates`.
+AGY's JSONL trajectories typically record a `PLANNER_RESPONSE` tool call,
+followed by a separate `GENERIC` (or `VIEW_FILE`) result step.
+For the local MP3 experiment, Step 1 invoked `read_file` on the target
+and Step 2 is a `content`-bearing record. The new output reports:
+the next step's allowlisted `event_type`, whether it resembles a tool
+result, `content_character_count`, and whether a textual audio MIME
+marker appears. It **never publishes the content or raw event label values**.
+
+A matching adjacent `GENERIC` record is **evidence of a tool-result
+record**, not proof the result contained playable MP3, that binary bytes were
+provided as model audio input, or that resulting transcription matches
+the original audio. Preserve `independent_audio_receipt_verified=false`
+until controlled, audio-grounded testing supports a stronger assertion.
