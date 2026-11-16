@@ -51,3 +51,19 @@ __pycache__/
 *.json3
 *.vtt
 *.srt
+
+# Local AGY Windows runtime experiments (code belongs under tools/, not these folders).
+sbs-threeway-*/
+sbs-3way-*/
+sbs_threeway_tools/
+captionless-vad-test-*/
+agy-url-auto-caption-multi-*/
+agy_clean_workspace/
+*.state
+*.pending.wav
+gui_*.png
+attachment_*.png
+flash_audio.json
+flash_mp4.json
+automation_status*.json
+window_diagnostics*.json
