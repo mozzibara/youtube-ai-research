@@ -22,7 +22,7 @@ For updates, first review any uncommitted work with `git status --short`, then u
 Use your existing runtime directory (with `agy_clean_workspace/clip_00_30.mp4` already prepared). Do not copy its real video or references into this repo's tracked files.
 
 ```powershell
-$run = "C:\kmj-ai-agent\YouTube-AI-Research-Public\sbs-threeway-20261116-141045"
+$run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -DryRun
 
 # Stages WAV and prompt in AGY, but does not submit a model request:
