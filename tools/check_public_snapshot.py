@@ -33,6 +33,12 @@ ALLOW_EXACT = {
     "docs/research/LEGACY_PRIVATE_HANDOFF.md",
     "tools/compare_multimodal_runs.py",
     "tools/check_public_snapshot.py",
+    "tools/agy_media_probe.py",
+    "tools/agy_media_file_drop.ps1",
+    "scripts/setup-agy-media.ps1",
+    "scripts/run-agy-media.ps1",
+    "requirements-agy-media.txt",
+    "docs/AGY_MEDIA_EXPERIMENT.md",
 }
 ALLOW_PREFIX = {
     "ytresearch/": (".py",),
