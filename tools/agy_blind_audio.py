@@ -293,6 +293,132 @@ def inspect_headless_trace(path: Path) -> dict:
     }
 
 
+def _parse_terminal_json_response(raw_response: str) -> dict | None:
+    """Parse ONLY the final model response, never intermediary tool/progress text."""
+    if not isinstance(raw_response, str) or not 1 <= len(raw_response) <= 100000:
+        return None
+    text = raw_response.strip()
+    fenced = re.fullmatch(r"\x60{3}(?:json)?\s*\n([\s\S]*?)\n\x60{3}", text,
+                          flags=re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("verdict") not in {"AUDIO_TRANSCRIBED", "NO_SPEECH",
+                                    "NO_AUDIO_ACCESS"}:
+        return None
+    if type(value.get("audio_analyzed")) is not bool:
+        return None
+    segments = value.get("segments")
+    if not isinstance(segments, list) or len(segments) > 100:
+        return None
+    if any(not isinstance(seg, dict)
+           or not isinstance(seg.get("text"), str)
+           or len(seg["text"]) > 2000
+           or not isinstance(seg.get("start"), (float, int))
+           or not isinstance(seg.get("end"), (float, int))
+           or isinstance(seg.get("start"), bool)
+           or isinstance(seg.get("end"), bool)
+           or not 0 <= seg["start"] < seg["end"] <= 30.5
+           for seg in segments):
+        return None
+    if value["verdict"] == "AUDIO_TRANSCRIBED":
+        if not value["audio_analyzed"] or not segments or not any(
+                seg["text"].strip() for seg in segments):
+            return None
+    elif value["verdict"] == "NO_SPEECH":
+        if not value["audio_analyzed"] or segments:
+            return None
+    else:
+        if value["audio_analyzed"] or segments:
+            return None
+    # Return only an allowlisted, validated subset. Never publish raw response.
+    return {"verdict": value["verdict"], "audio_analyzed": value["audio_analyzed"],
+            "segments": [{"start": seg["start"], "end": seg["end"],
+                          "text": seg["text"]} for seg in segments]}
+
+
+def _terminal_response_from_stream(path: Path) -> tuple[str, str | None]:
+    """Return final successful model response, not a tool message or stream delta."""
+    if not path.exists():
+        return "TRACE_MISSING", None
+    terminals = []
+    with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and obj.get("event") == "result":
+                event = obj.get("result")
+                if isinstance(event, dict):
+                    terminals.append(event)
+    if len(terminals) != 1:
+        return "NO_UNIQUE_TERMINAL_RESULT", None
+    event = terminals[0]
+    if event.get("status") != "SUCCESS":
+        return "TERMINAL_NOT_SUCCESS", None
+    response = event.get("response")
+    if not isinstance(response, str) or not response.strip():
+        return "EMPTY_TERMINAL_RESPONSE", None
+    return "TERMINAL_RESPONSE_PRESENT", response
+
+
+def recover_case(priv: Path, manifest: dict, item: dict) -> dict:
+    """Recover already-saved terminal JSON only, without calling any model."""
+    case_id = item["id"]
+    ws = Path(manifest["runtime_root"]) / case_id
+    original = ws / "answer.json"
+    recovered = priv / "recoveries" / (case_id + ".response.json")
+    if original.exists():
+        return {"trial": case_id, "recovery": "ORIGINAL_ANSWER_PRESENT"}
+    if recovered.exists():
+        return {"trial": case_id, "recovery": "ALREADY_RECOVERED"}
+    media = ws / "clip_00_30.mp3"
+    if not media.is_file() or _sha(media) != item["sha256"]:
+        return {"trial": case_id, "recovery": "MEDIA_HASH_MISMATCH"}
+    status_file = priv / (case_id + ".status.json")
+    try:
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+        if (status.get("submitted") is not True
+                or status.get("exit_code") != 0
+                or status.get("timed_out") is not False):
+            return {"trial": case_id, "recovery": "CLI_NOT_COMPLETED"}
+    except (OSError, ValueError):
+        return {"trial": case_id, "recovery": "CLI_STATUS_MISSING"}
+    trace = priv / (case_id + ".ndjson")
+    provenance = inspect_headless_trace(trace)
+    if not provenance["terminal_success_observed"]:
+        return {"trial": case_id, "recovery": "TERMINAL_NOT_SUCCESS"}
+    if not provenance["mp3_read_call_observed"]:
+        return {"trial": case_id, "recovery": "NO_MP3_READ_FILE_CALL"}
+    if provenance["other_tool_calls_observed"]:
+        return {"trial": case_id, "recovery": "DISALLOWED_TOOL_CALL"}
+    state, response = _terminal_response_from_stream(trace)
+    if response is None:
+        return {"trial": case_id, "recovery": state}
+    obj = _parse_terminal_json_response(response)
+    if obj is None:
+        return {"trial": case_id, "recovery": "UNPARSEABLE_TERMINAL_JSON",
+                "terminal_response_length": len(response),
+                "terminal_has_json_fence": "\x60\x60\x60" in response}
+    _json(recovered, obj)
+    return {"trial": case_id, "recovery": "RECOVERED_FROM_TERMINAL_JSON",
+            "verdict": obj["verdict"], "audio_analyzed_reported": obj["audio_analyzed"],
+            "segment_count": len(obj["segments"])}
+
+
+def recover(private_root: Path, session: str) -> dict:
+    priv, manifest = _load_session(private_root, session)
+    cases = [recover_case(priv, manifest, item) for item in manifest["cases"]]
+    return {"session": session, "source": "EXISTING_PRIVATE_STREAM_JSON",
+            "model_called": False, "cases": cases}
+
+
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).lower()
     # ASR may render individual spoken Korean digits as Arabic numerals.
@@ -341,7 +467,12 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
         workspace = Path(manifest["runtime_root"]) / item["id"]
         media = workspace / "clip_00_30.mp3"
         matched = media.exists() and _sha(media) == item["sha256"]
-        verdict, text, analyzed = _read_answer(workspace / "answer.json")
+        original = workspace / "answer.json"
+        recovered = priv / "recoveries" / (item["id"] + ".response.json")
+        source = "workspace_answer" if original.exists() else (
+            "private_terminal_recovery" if recovered.exists() else "missing")
+        verdict, text, analyzed = _read_answer(
+            original if original.exists() else recovered)
         status_path = priv / (item["id"] + ".status.json")
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -365,6 +496,7 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "verdict": verdict, "cer": round(error, 4) if error is not None else None,
                       "nonce_recognized": nonce, "audio_analyzed_reported": analyzed,
                       "audio_hash_matched": matched, "cli_success": completed,
+                      "answer_source": source,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
                       "other_tool_calls_observed": provenance["other_tool_calls_observed"],
                       "terminal_success_observed": provenance["terminal_success_observed"],
@@ -408,6 +540,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--auto-approve", action="store_true",
                    help="Explicitly allow tool actions without asking; sandbox may vary by OS")
     r.add_argument("--timeout", type=int, default=240)
+    recover_parser = sub.add_parser(
+        "recover", help="Recover strict final JSON from previously saved private headless streams")
+    recover_parser.add_argument("--private-root", type=Path, default=None)
+    recover_parser.add_argument("--session", required=True)
     e = sub.add_parser("evaluate", help="Compute private CER, nonce and silence checks")
     e.add_argument("--private-root", type=Path, default=None)
     e.add_argument("--session", required=True)
@@ -433,6 +569,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = run_trial(private_root, args.session, args.trial,
                                args.submit, args.auto_approve, args.timeout)
+    elif args.action == "recover":
+        result = recover(private_root, args.session)
     else:
         result = evaluate(private_root, args.session, args.max_cer)
     print(json.dumps(result, ensure_ascii=False, indent=2))
