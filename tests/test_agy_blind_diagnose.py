@@ -189,6 +189,26 @@ class DiagnosisTests(unittest.TestCase):
             self.assertNotIn("비공개 정답", json.dumps(result, ensure_ascii=False))
             self.assertNotIn("팔육사삼구이", json.dumps(result, ensure_ascii=False))
 
+    def test_three_condition_manifest_supported_without_exposing_tone_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            private = Path(td) / "truth"
+            folder = private / SESSION
+            folder.mkdir(parents=True)
+            manifest = {"schema": "agy_blind_audio_v2", "session": SESSION,
+                        "cases": [{"id": CASE, "kind": "tone", "beep_count": 5,
+                                   "reference": "", "nonce": ""}]}
+            (folder / "manifest.json").write_text(json.dumps(manifest),
+                                                   encoding="utf-8")
+            (folder / (CASE + ".ndjson")).write_text(
+                "\n".join(json.dumps(x) for x in self._rows()) + "\n",
+                encoding="utf-8")
+            (folder / (CASE + ".stderr")).write_text("", encoding="utf-8")
+            result = mod.summarize(private, SESSION)
+            self.assertEqual(result["case_count"], 1)
+            self.assertFalse(result["model_called"])
+            self.assertNotIn("beep_count", json.dumps(result))
+            self.assertNotIn('"kind": "tone"', json.dumps(result))
+
     def test_path_traversal_session_is_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(ValueError):
