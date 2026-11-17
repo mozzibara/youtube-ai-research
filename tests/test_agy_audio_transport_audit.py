@@ -226,6 +226,92 @@ class AudioByteReceiptAuditTests(unittest.TestCase):
         self.assertEqual(report["trials"][0]["assessment"], "NO_TOOL_RESULT_AUDIO_BYTES")
         self.assertNotIn("PRIVATE_", proc.stdout)
 
+    def test_probe_shape_detects_legacy_unscoped_target_without_private_content(self):
+        """User's observed UNKNOWN_SHAPE is a read-call observation, not byte proof."""
+        row = self._call()
+        row["step_update"]["tool_info"]["parameters"] = {
+            "opaque_private_parameter": {"input_file": "C:/Sensitive/clip_00_30.mp3"},
+            "secret_value": "DO_NOT_PRINT_PRIVATE_VALUE"
+        }
+        self._trace(row)
+        report = audit.probe_session(self.private_root, SESSION)
+        self.assertEqual(report["schema"], "agy_cli_audio_event_shape_v1")
+        self.assertFalse(report["model_called"])
+        case = report["trials"][0]
+        self.assertEqual(case["legacy_target_read_calls"], 1)
+        self.assertEqual(case["strict_target_read_calls"], 0)
+        self.assertEqual(case["target_argument_shape"], "UNSCOPED_LEGACY_REFERENCE")
+        self.assertIn("OBJECT", case["parameter_envelope_types"])
+        self.assertGreaterEqual(case["unrecognized_top_level_keys"], 1)
+        self.assertFalse(case["independent_binary_transport_verified"])
+        dumped = json.dumps(report)
+        for secret in ("Sensitive", "opaque_private_parameter", "input_file",
+                       "secret_value", "DO_NOT_PRINT_PRIVATE_VALUE"):
+            self.assertNotIn(secret, dumped)
+
+    def test_probe_shape_reports_direct_known_path_without_path_value(self):
+        self._trace(self._call(result=self._inline()))
+        report = audit.probe_session(self.private_root, SESSION)
+        case = report["trials"][0]
+        self.assertEqual(case["strict_target_read_calls"], 1)
+        self.assertEqual(case["target_argument_shape"], "STRICT_KNOWN_PATH_FIELD")
+        self.assertEqual(case["parameter_known_keys"], ["file_path"])
+        self.assertEqual(case["observed_tool_result_fields"], ["result"])
+        self.assertNotIn("clip_00_30.mp3", json.dumps(report))
+
+    def test_probe_shape_detects_json_text_parameters(self):
+        row = self._call()
+        row["step_update"]["tool_info"]["parameters"] = json.dumps({
+            "file_path": "C:/secret/clip_00_30.mp3",
+            "private_extra": "NOT_PRINTED"
+        })
+        self._trace(row)
+        trial = audit.probe_session(self.private_root, SESSION)["trials"][0]
+        self.assertEqual(trial["parameter_envelope_types"], ["JSON_OBJECT_TEXT"])
+        self.assertEqual(trial["target_argument_shape"], "STRICT_KNOWN_PATH_FIELD")
+        self.assertNotIn("NOT_PRINTED", json.dumps(trial))
+
+    def test_probe_shape_ignores_model_terminal_and_other_tools(self):
+        self._trace(
+            {"event": "result", "result": {"response": "clip_00_30.mp3"}},
+            self._call(name="write_file", target="clip_00_30.mp3"))
+        trial = audit.probe_session(self.private_root, SESSION)["trials"][0]
+        self.assertEqual(trial["read_file_tool_events"], 0)
+        self.assertEqual(trial["legacy_target_read_calls"], 0)
+        self.assertEqual(trial["target_argument_shape"], "NO_LEGACY_TARGET_EVENT")
+
+    def test_shape_probe_is_read_only_and_has_direct_cli_entrypoint(self):
+        self._trace(self._call())
+        before = {str(p): p.read_bytes() for p in self.private.rglob("*")
+                  if p.is_file()}
+        with patch.object(audit.subprocess, "run",
+                          side_effect=AssertionError("No model call")):
+            report = audit.probe_session(self.private_root, SESSION)
+        after = {str(p): p.read_bytes() for p in self.private.rglob("*")
+                 if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertFalse(report["model_called"])
+        tool = Path(__file__).resolve().parents[1] / "tools" / "agy_audio_transport_audit.py"
+        completed = subprocess.run(
+            [sys.executable, str(tool), "--session", SESSION, "--inspect-shape",
+             "--private-root", str(self.private_root)],
+            capture_output=True, text=True, check=False, timeout=30)
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(json.loads(completed.stdout)["schema"],
+                         "agy_cli_audio_event_shape_v1")
+
+    def test_shape_probe_rejects_symlinked_trace(self):
+        target = self.private / "untrusted.ndjson"
+        target.write_text(json.dumps(self._call()), encoding="utf-8")
+        link = self.private / (CASE + ".ndjson")
+        try:
+            link.symlink_to(target)
+        except OSError:
+            self.skipTest("symlink unavailable")
+        trial = audit.probe_session(self.private_root, SESSION)["trials"][0]
+        self.assertEqual(trial["trace_status"], "UNSAFE_TRACE")
+        self.assertFalse(trial["independent_binary_transport_verified"])
+
     def test_invalid_session_refused(self):
         with self.assertRaises(ValueError):
             audit.audit_session(self.private_root, "../unsafe")
