@@ -306,11 +306,15 @@ def run_trial(private_root: Path, session: str, case_id: str, submit: bool,
                                   check=False)
             status = {"submitted": True, "exit_code": proc.returncode,
                       "timed_out": False, "auto_approve": auto_approve,
-                      "output_contract": "host_terminal_json_v2"}
+                      "output_contract": (ACOUSTIC_CONTRACT
+                          if manifest["schema"] == "agy_blind_audio_v2"
+                          else "host_terminal_json_v2")}
         except subprocess.TimeoutExpired:
             status = {"submitted": True, "exit_code": None,
                       "timed_out": True, "auto_approve": auto_approve,
-                      "output_contract": "host_terminal_json_v2"}
+                      "output_contract": (ACOUSTIC_CONTRACT
+                          if manifest["schema"] == "agy_blind_audio_v2"
+                          else "host_terminal_json_v2")}
     _json(status_file, status)
     # The model must not write answer.json. Any unexpected model-created answer
     # is retained as evidence but cannot make a clean read-only trial pass.
@@ -377,7 +381,8 @@ def inspect_headless_trace(path: Path) -> dict:
     }
 
 
-def _parse_terminal_json_response(raw_response: str) -> dict | None:
+def _parse_terminal_json_response(
+        raw_response: str, *, contract: str | None = None) -> dict | None:
     """Parse ONLY the final model response, never intermediary tool/progress text."""
     if not isinstance(raw_response, str) or not 1 <= len(raw_response) <= 100000:
         return None
@@ -421,9 +426,32 @@ def _parse_terminal_json_response(raw_response: str) -> dict | None:
         if value["audio_analyzed"] or segments:
             return None
     # Return only an allowlisted, validated subset. Never publish raw response.
-    return {"verdict": value["verdict"], "audio_analyzed": value["audio_analyzed"],
-            "segments": [{"start": seg["start"], "end": seg["end"],
-                          "text": seg["text"]} for seg in segments]}
+    canonical = {"verdict": value["verdict"], "audio_analyzed": value["audio_analyzed"],
+                 "segments": [{"start": seg["start"], "end": seg["end"],
+                               "text": seg["text"]} for seg in segments]}
+    if contract == ACOUSTIC_CONTRACT:
+        acoustic_class = value.get("acoustic_class")
+        beep_count = value.get("beep_count")
+        if acoustic_class not in ACOUSTIC_CLASSES:
+            return None
+        if (value["verdict"] == "AUDIO_TRANSCRIBED" and not
+                (acoustic_class == "SPEECH" and type(beep_count) is int
+                 and beep_count == 0)):
+            return None
+        if value["verdict"] == "NO_SPEECH" and not (
+            acoustic_class == "TONE" and type(beep_count) is int
+            and beep_count in TONE_COUNTS or
+            acoustic_class == "SILENCE" and type(beep_count) is int
+            and beep_count == 0
+        ):
+            return None
+        if value["verdict"] == "NO_AUDIO_ACCESS" and not (
+            acoustic_class == "UNAVAILABLE" and beep_count is None
+        ):
+            return None
+        canonical["acoustic_class"] = acoustic_class
+        canonical["beep_count"] = beep_count
+    return canonical
 
 
 def _terminal_response_from_stream(path: Path) -> tuple[str, str | None]:
@@ -485,7 +513,8 @@ def recover_case(priv: Path, manifest: dict, item: dict) -> dict:
     state, response = _terminal_response_from_stream(trace)
     if response is None:
         return {"trial": case_id, "recovery": state}
-    obj = _parse_terminal_json_response(response)
+    obj = _parse_terminal_json_response(
+        response, contract=status.get("output_contract"))
     if obj is None:
         return {"trial": case_id, "recovery": "UNPARSEABLE_TERMINAL_JSON",
                 "terminal_response_length": len(response),
@@ -542,6 +571,18 @@ def _read_answer(path: Path) -> tuple[str, str, bool]:
         return "INVALID", "", False
 
 
+def _read_acoustic_answer(path: Path) -> tuple[str | None, int | None]:
+    """Revalidate a v3 private answer; never emit its transcription."""
+    try:
+        value = _parse_terminal_json_response(
+            path.read_text(encoding="utf-8-sig"), contract=ACOUSTIC_CONTRACT)
+    except (OSError, UnicodeError):
+        return None, None
+    if value is None:
+        return None, None
+    return value["acoustic_class"], value["beep_count"]
+
+
 def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
     if not 0 <= threshold <= 1:
         raise ValueError("CER threshold must be between 0 and 1")
@@ -568,17 +609,32 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
             completed = False
         provenance = inspect_headless_trace(priv / (item["id"] + ".ndjson"))
         condition = item["kind"]
+        acoustic_class = None
+        reported_beeps = None
+        acoustic_class_match = None
+        tone_count_match = None
+        if output_contract == ACOUSTIC_CONTRACT:
+            acoustic_class, reported_beeps = _read_acoustic_answer(
+                original if original.exists() else recovered)
+            acoustic_class_match = acoustic_class == condition.upper()
+            if condition == "tone":
+                tone_count_match = (type(reported_beeps) is int and
+                                    reported_beeps == item.get("beep_count"))
         error = cer(item["reference"], text) if condition == "speech" else None
         nonce = normalize(item["nonce"]) in normalize(text) if condition == "speech" else None
-        host_output_isolation = (output_contract != "host_terminal_json_v2"
-                                 or source == "private_terminal_recovery")
+        host_output_isolation = (output_contract not in {
+            "host_terminal_json_v2", ACOUSTIC_CONTRACT}
+            or source == "private_terminal_recovery")
         ok = bool(matched and completed and analyzed and host_output_isolation
+                  and (output_contract != ACOUSTIC_CONTRACT or
+                       acoustic_class_match and
+                       (condition != "tone" or tone_count_match))
                   and provenance["mp3_read_call_observed"]
                   and provenance["terminal_success_observed"]
                   and not provenance["other_tool_calls_observed"] and (
             condition == "speech" and verdict == "AUDIO_TRANSCRIBED"
             and bool(text.strip()) and error <= threshold and nonce
-            or condition == "silence" and verdict == "NO_SPEECH"
+            or condition in {"silence", "tone"} and verdict == "NO_SPEECH"
             and not text.strip()))
         cases.append({"trial": item["id"], "kind": condition,
                       "verdict": verdict, "cer": round(error, 4) if error is not None else None,
@@ -586,6 +642,9 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "audio_hash_matched": matched, "cli_success": completed,
                       "answer_source": source,
                       "output_contract": output_contract,
+                      "acoustic_class_reported": acoustic_class,
+                      "acoustic_class_match": acoustic_class_match,
+                      "tone_count_match": tone_count_match,
                       "host_output_isolation": host_output_isolation,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
                       "other_tool_calls_observed": provenance["other_tool_calls_observed"],
@@ -593,16 +652,20 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "pass": ok})
     speech = [x for x in cases if x["kind"] == "speech"]
     silence = [x for x in cases if x["kind"] == "silence"]
+    tones = [x for x in cases if x["kind"] == "tone"]
     all_complete = all(x["cli_success"] and x["verdict"] not in {"MISSING", "INVALID"}
                        for x in cases)
-    sufficient = len(speech) >= 3 and len(silence) >= 2
+    sufficient = (len(speech) >= 3 and len(silence) >= 1 and len(tones) >= 1
+                  if manifest["schema"] == "agy_blind_audio_v2" else
+                  len(speech) >= 3 and len(silence) >= 2)
     overall = ("INCOMPLETE" if not all_complete else
                "FAIL_AUDIO_DISCRIMINATION" if not all(x["pass"] for x in cases)
                else "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
                "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
     report = {"schema": "agy_blind_audio_evaluation_v1", "session": session,
               "total_trials": len(cases), "speech_trials": len(speech),
-              "silence_trials": len(silence), "all_complete": all_complete,
+              "tone_trials": len(tones), "silence_trials": len(silence),
+              "all_complete": all_complete,
               "threshold_cer": threshold, "overall": overall, "trials": cases,
               "independent_binary_transport_verified": False,
               "note": "Behavioral blind test; no raw transcript or answer key is printed."}
@@ -621,7 +684,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--runtime-root", type=Path, default=None)
     p.add_argument("--private-root", type=Path, default=None)
     p.add_argument("--speech-count", type=int, default=3)
-    p.add_argument("--silence-count", type=int, default=2)
+    p.add_argument("--silence-count", type=int, default=1)
+    p.add_argument("--tone-count", type=int, default=1)
     r = sub.add_parser("run", help="Run a single trial only with --submit")
     r.add_argument("--private-root", type=Path, default=None)
     r.add_argument("--session", required=True)
@@ -642,7 +706,8 @@ def main(argv: list[str] | None = None) -> int:
     private_root = args.private_root or _default_root("truth")
     if args.action == "prepare":
         result = prepare(args.runtime_root or _default_root("runtime"),
-                         private_root, args.speech_count, args.silence_count)
+                         private_root, args.speech_count, args.silence_count,
+                         args.tone_count)
     elif args.action == "run":
         if not 30 <= args.timeout <= 900:
             parser.error("timeout must be between 30 and 900 seconds")
