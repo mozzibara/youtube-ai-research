@@ -242,6 +242,56 @@ def run_trial(private_root: Path, session: str, case_id: str, submit: bool,
             "raw_cli_log_private": True}
 
 
+def inspect_headless_trace(path: Path) -> dict:
+    """Extract only provenance flags from actual typed AGY stream-json tool events."""
+    reads = set()
+    forbidden = set()
+    result_success = False
+    if not path.exists():
+        return {"mp3_read_call_observed": False, "other_tool_calls_observed": False,
+                "terminal_success_observed": False}
+    with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            event = row.get("event")
+            if event == "result":
+                final = row.get("result")
+                if isinstance(final, dict) and final.get("status") == "SUCCESS":
+                    result_success = True
+            if event != "step_update":
+                continue
+            step = row.get("step_update")
+            if not isinstance(step, dict) or step.get("step_type") != "tool":
+                continue
+            info = step.get("tool_info")
+            if not isinstance(info, dict):
+                continue
+            name = info.get("name") or step.get("tool_name")
+            if not isinstance(name, str):
+                continue
+            name = name.split(".")[-1]
+            index = step.get("step_index")
+            if name == "read_file":
+                parameters = info.get("parameters")
+                serialized = json.dumps(parameters, ensure_ascii=False)
+                if "clip_00_30.mp3" in serialized.casefold():
+                    reads.add(index)
+                else:
+                    forbidden.add(index)
+            elif name not in {"write_file", "write_to_file"}:
+                forbidden.add(index)
+    return {
+        "mp3_read_call_observed": bool(reads),
+        "other_tool_calls_observed": bool(forbidden),
+        "terminal_success_observed": result_success,
+    }
+
+
 def normalize(text: str) -> str:
     text = unicodedata.normalize("NFKC", text).lower()
     # ASR may render individual spoken Korean digits as Arabic numerals.
@@ -298,10 +348,14 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                          status.get("submitted") is True and not status.get("timed_out"))
         except (OSError, ValueError):
             completed = False
+        provenance = inspect_headless_trace(priv / (item["id"] + ".ndjson"))
         condition = item["kind"]
         error = cer(item["reference"], text) if condition == "speech" else None
         nonce = normalize(item["nonce"]) in normalize(text) if condition == "speech" else None
-        ok = bool(matched and completed and analyzed and (
+        ok = bool(matched and completed and analyzed
+                  and provenance["mp3_read_call_observed"]
+                  and provenance["terminal_success_observed"]
+                  and not provenance["other_tool_calls_observed"] and (
             condition == "speech" and verdict == "AUDIO_TRANSCRIBED"
             and bool(text.strip()) and error <= threshold and nonce
             or condition == "silence" and verdict == "NO_SPEECH"
@@ -310,6 +364,9 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "verdict": verdict, "cer": round(error, 4) if error is not None else None,
                       "nonce_recognized": nonce, "audio_analyzed_reported": analyzed,
                       "audio_hash_matched": matched, "cli_success": completed,
+                      "mp3_read_call_observed": provenance["mp3_read_call_observed"],
+                      "other_tool_calls_observed": provenance["other_tool_calls_observed"],
+                      "terminal_success_observed": provenance["terminal_success_observed"],
                       "pass": ok})
     speech = [x for x in cases if x["kind"] == "speech"]
     silence = [x for x in cases if x["kind"] == "silence"]
@@ -345,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="Run a single trial only with --submit")
     r.add_argument("--private-root", type=Path, default=None)
     r.add_argument("--session", required=True)
-    r.add_argument("--trial", required=True)
+    r.add_argument("--trial", required=True, help="Trial id or 'all' for sequential run")
     r.add_argument("--submit", action="store_true")
     r.add_argument("--auto-approve", action="store_true",
                    help="Explicitly allow tool actions without asking; sandbox may vary by OS")
@@ -364,11 +421,25 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("timeout must be between 30 and 900 seconds")
         if args.auto_approve and not args.submit:
             parser.error("auto-approve requires explicit --submit")
-        result = run_trial(private_root, args.session, args.trial,
-                           args.submit, args.auto_approve, args.timeout)
+        if args.trial == "all":
+            _, manifest = _load_session(private_root, args.session)
+            results = [run_trial(private_root, args.session, item["id"],
+                                 args.submit, args.auto_approve, args.timeout)
+                       for item in manifest["cases"]]
+            result = {"session": args.session, "submitted": args.submit,
+                      "model_requests": len(results) if args.submit else 0,
+                      "trials": results}
+        else:
+            result = run_trial(private_root, args.session, args.trial,
+                               args.submit, args.auto_approve, args.timeout)
     else:
         result = evaluate(private_root, args.session, args.max_cer)
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if args.action == "run" and args.submit:
+        trials = result.get("trials", [result])
+        if any(x.get("exit_code") != 0 or x.get("timed_out")
+               or not x.get("answer_present") for x in trials):
+            return 2
     return 0
 
 
