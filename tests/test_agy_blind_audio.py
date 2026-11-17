@@ -477,6 +477,99 @@ class BlindAudioTests(unittest.TestCase):
         self.assertIsNotNone(mod._parse_terminal_json_response(
             json.dumps(no_access), contract=mod.ACOUSTIC_CONTRACT))
 
+    def test_terminal_response_validation_reasons_are_safe_and_specific(self):
+        base = {"verdict": "NO_SPEECH", "audio_analyzed": True,
+                "acoustic_class": "SILENCE", "beep_count": 0, "segments": []}
+        cases = [
+            (json.dumps(base), "VALID_TERMINAL_JSON"),
+            ("utterance " + json.dumps(base), "INVALID_JSON_SYNTAX_OR_ADDITIONAL_TEXT"),
+            ("{" + "invalid", "INVALID_JSON_SYNTAX_OR_ADDITIONAL_TEXT"),
+            (json.dumps([base]), "JSON_TOP_LEVEL_NOT_OBJECT"),
+            (json.dumps({**base, "verdict": "NOT_A_VERDICT"}),
+             "VERDICT_MISSING_OR_INVALID"),
+            (json.dumps({**base, "audio_analyzed": "yes"}),
+             "AUDIO_ANALYZED_NOT_BOOLEAN"),
+            (json.dumps({**base, "segments": "private-phrase"}),
+             "SEGMENTS_NOT_VALID_LIST"),
+            (json.dumps({**base, "segments": [{"text": "private-phrase"}]}),
+             "SEGMENT_ELEMENT_SCHEMA_INVALID"),
+            (json.dumps({**base, "audio_analyzed": False}),
+             "VERDICT_SEGMENTS_OR_ANALYSIS_CONFLICT"),
+            (json.dumps({**base, "acoustic_class": "NOT_AN_AUDIO_CLASS"}),
+             "ACOUSTIC_CLASS_MISSING_OR_INVALID"),
+            (json.dumps({**base, "beep_count": None}),
+             "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT"),
+            (json.dumps({**base, "acoustic_class": "TONE", "beep_count": 3}),
+             "VALID_TERMINAL_JSON"),
+            (json.dumps({**base, "verdict": "NO_AUDIO_ACCESS",
+                         "audio_analyzed": False}),
+             "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT"),
+            (json.dumps({**base, "verdict": "NO_AUDIO_ACCESS",
+                         "audio_analyzed": False,
+                         "acoustic_class": "UNAVAILABLE",
+                         "beep_count": None}),
+             "VALID_TERMINAL_JSON"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(category=expected):
+                diag = mod._categorize_response_validation(
+                    raw, mod.ACOUSTIC_CONTRACT)
+                self.assertEqual(diag["validation_category"], expected)
+                serialized = json.dumps(diag, ensure_ascii=False)
+                for forbidden in ["private-phrase", "NOT_A_VERDICT",
+                                  "NOT_AN_AUDIO_CLASS", "utterance"]:
+                    self.assertNotIn(forbidden, serialized)
+                self.assertFalse(diag["independent_audio_receipt_verified"])
+
+    def test_terminal_diagnostic_reads_existing_private_logs_without_model(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            case_id = "case-000000000004"
+            target = private / (case_id + ".ndjson")
+            lines = [json.loads(x) for x in target.read_text(
+                encoding="utf-8").splitlines()]
+            # An invalid silence answer. Preserve it; never silently
+            # relabel NO_AUDIO_ACCESS as a successful silent detection.
+            lines[-1]["result"]["response"] = json.dumps({
+                "verdict": "NO_AUDIO_ACCESS", "audio_analyzed": False,
+                "acoustic_class": "SILENCE", "beep_count": 0,
+                "segments": [], "private_secret": "NEVER_EXPORT_THIS"
+            })
+            target.write_text("\n".join(json.dumps(x) for x in lines) + "\n",
+                              encoding="utf-8")
+            before = target.read_bytes()
+            with patch.object(mod.subprocess, "run",
+                              side_effect=AssertionError("No AGY replay")), \
+                 patch.object(mod, "_json",
+                              side_effect=AssertionError("Read only")):
+                report = mod.diagnose_terminal_responses(private.parent, SESSION)
+            self.assertEqual(before, target.read_bytes())
+            self.assertFalse(report["model_called"])
+            self.assertTrue(report["all_responses_private"])
+            self.assertEqual(len(report["trials"]), 5)
+            item = next(x for x in report["trials"] if x["trial"] == case_id)
+            self.assertEqual(item["validation_category"],
+                             "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT")
+            self.assertEqual(item["reported_verdict"], "NO_AUDIO_ACCESS")
+            self.assertEqual(item["reported_acoustic_class"], "SILENCE")
+            self.assertEqual(item["reported_beep_count_type"], "INTEGER")
+            self.assertNotIn("NEVER_EXPORT_THIS", json.dumps(report))
+
+    def test_terminal_diagnostic_missing_log_or_invalid_status_is_safe(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            case_id = "case-000000000004"
+            (private / (case_id + ".ndjson")).unlink()
+            status_path = private / (case_id + ".status.json")
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["output_contract"] = {"secret": "DO_NOT_EXPORT"}
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            report = mod.diagnose_terminal_responses(private.parent, SESSION)
+            item = next(x for x in report["trials"] if x["trial"] == case_id)
+            self.assertEqual(item["validation_category"], "TRACE_MISSING")
+            self.assertEqual(item["output_contract"], "UNKNOWN_CONTRACT")
+            self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
+
     def test_evaluation_rejects_modified_audio(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, private = self._fixture(td)
