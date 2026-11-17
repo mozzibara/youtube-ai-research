@@ -4,6 +4,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -207,6 +209,22 @@ class AudioByteReceiptAuditTests(unittest.TestCase):
         self.assertEqual(trial["assessment"], "TARGET_READ_CALL_SHAPE_UNSUPPORTED")
         self.assertFalse(trial["exact_mp3_bytes_in_tool_result"])
         self.assertEqual(trial["tool_result_audio_payload_count"], 0)
+
+    def test_windows_powershell_documented_script_entrypoint_offline(self):
+        """The user invokes the file path directly, not python -m tools."""
+        self._trace(self._call())
+        root = Path(__file__).resolve().parents[1]
+        tool = root / "tools" / "agy_audio_transport_audit.py"
+        proc = subprocess.run(
+            [sys.executable, str(tool), "--session", SESSION,
+             "--private-root", str(self.private_root)],
+            cwd=root, capture_output=True, text=True, check=False, timeout=30)
+        self.assertEqual(proc.returncode, 0, "CLI offline entrypoint failed")
+        report = json.loads(proc.stdout)
+        self.assertFalse(report["model_called"])
+        self.assertFalse(report["independent_binary_transport_verified"])
+        self.assertEqual(report["trials"][0]["assessment"], "NO_TOOL_RESULT_AUDIO_BYTES")
+        self.assertNotIn("PRIVATE_", proc.stdout)
 
     def test_invalid_session_refused(self):
         with self.assertRaises(ValueError):
