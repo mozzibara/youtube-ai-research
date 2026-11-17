@@ -160,7 +160,7 @@ def _scan_trace(trace: Path, size: int, digest: str) -> dict:
         if not isinstance(step, dict) or step.get("step_type") != "tool":
             continue
         info = step.get("tool_info")
-        if not isinstance(info, dict) or info.get("name", "").split(".")[-1] != "read_file":
+        if not isinstance(info, dict) or not isinstance(info.get("name"), str) or info["name"].split(".")[-1] != "read_file":
             continue
         if not _target_argument(info.get("parameters")):
             continue
