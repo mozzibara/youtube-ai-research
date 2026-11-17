@@ -512,6 +512,15 @@ Interpret `assessment` as follows:
 - `MATCHED_CLI_TOOL_RESULT_BYTES`: exact source MP3 bytes appeared in
   a correlated, structured AGY CLI tool result. This is a **CLI-stream
   byte match**, *not* independently proven model ingestion.
+- `TARGET_READ_CALL_SHAPE_UNSUPPORTED`: the established blind evaluator
+  observed the target MP3 read call, but the stricter byte-audit parser could
+  not correlate its parameter envelope. This is a **protocol/parser
+  compatibility gap**, not evidence that no read occurred. The audit reports
+  `legacy_provenance_only=true` and never promotes an uncorrelated audio
+  payload to a byte match.
+- `NO_TARGET_READ_CALL`: neither the strict parser nor the existing
+  evaluator observed a target read call in the available typed stream;
+  it does not prove one never occurred in AGY internals.
 - `NO_TOOL_RESULT_AUDIO_BYTES`: an MP3 read call occurred, but the stream
   exposed no verifiable inline audio bytes. This is **inconclusive**, not
   evidence that the model did not receive audio.
