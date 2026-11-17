@@ -623,3 +623,47 @@ The command does not modify private files or invoke AGY. Its purpose
 is to identify whether a narrow, evidence-backed follow-up parser is
 possible. Avoid adding speculative aliases or treating untrusted
 tool-call argument text as proof of MP3 byte delivery.
+
+
+### Single next check: typed return envelope after deduplicated read_file events
+
+For the archived session `blind-ecc67afd26534f13`, the five trials each
+already have exactly **two AGY stream events referencing the MP3 under
+one step index**. No tool call ID or explicit tool-result correlation
+was found, and the recorded step status was an unknown/missing value.
+This establishes *one distinct observed tool step per trial*, not two
+independent audio reads and not confirmed transport to Gemini.
+
+The new `--inspect-return-envelope` mode examines **only the first four
+event records after the last target read_file step update**. It reveals
+fixed-label envelopes and scalar *types*, never actual contents.
+It is intentionally narrower than another session evaluation:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-return-envelope
+```
+
+It prints `target_status_slots` (presence/type at the existing known
+`step.status` and `tool_info.status` paths),
+`target_known_status_labels` (only enumerated values),
+and `adjacent_envelopes` with an allowlisted event kind, step subtype,
+content type, source label and selected standard **field names**. Unknown
+keys/values, paths, model text, media, and any tokens remain private.
+
+Interpret `return_assessment` conservatively:
+
+- `ADJACENT_UNTYPED_EVENTS_ONLY`: surrounding events exist, but no typed
+  `TOOL`-source result is evidenced in the selected window.
+- `UNLINKED_TYPED_RESULT_CANDIDATE`: a typed result candidate was
+  observed, **not** proven to belong to the target read call, and not
+  proven to contain MP3 audio or reach Gemini.
+- `NO_POST_TARGET_EVENT`, `NO_TARGET_EVENT`,
+  `INCOMPLETE_TRACE`, `TRACE_MISSING`, or `UNSAFE_TRACE`
+  are inconclusive for the audio delivery question.
+
+A model-generated terminal `result.response` is **not** a tool return,
+even if its text mentions an MP3, MIME label, or transcription. A
+structured result without a matching call ID likewise cannot be
+promoted to verified byte transport. All independent ingress flags
+remain false. No new AGY invocation or prior trial replay is needed.
