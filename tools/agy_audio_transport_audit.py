@@ -449,14 +449,242 @@ def probe_session(private_root: Path, session: str) -> dict:
     }
 
 
+
+# These fixed output categories never depend on arbitrary input key names.
+LIFECYCLE_TARGET = "clip_00_30.mp3"
+LIFECYCLE_MAX_DEPTH = 12
+
+
+def _target_reference_location(params: object) -> str:
+    """Location of a basename reference, never a verified file read.
+
+    Inspect values and keys separately. A filename appearing as a JSON key
+    must not be mistaken for a path value. Arbitrary unknown keys are never
+    printed or trusted as canonical read_file path fields.
+    """
+    _, obj = _parameter_envelope(params)
+    direct = False
+    nested = False
+    key_only = False
+
+    def visit(node: object, depth: int) -> None:
+        nonlocal direct, nested, key_only
+        if depth > LIFECYCLE_MAX_DEPTH:
+            return
+        if isinstance(node, str):
+            if LIFECYCLE_TARGET in node.casefold():
+                if depth <= 1:
+                    direct = True
+                else:
+                    nested = True
+        elif isinstance(node, dict):
+            for key, value in list(node.items())[:200]:
+                if isinstance(key, str) and LIFECYCLE_TARGET in key.casefold():
+                    key_only = True
+                visit(value, depth + 1)
+        elif isinstance(node, list):
+            for item in node[:200]:
+                visit(item, depth + 1)
+
+    visit(obj, 0)
+    if direct:
+        return "DIRECT_VALUE"
+    if nested:
+        return "NESTED_VALUE"
+    if key_only:
+        return "KEY_ONLY"
+    return "NONE"
+
+
+def _safe_lifecycle_event_kind(row: dict) -> str:
+    event = row.get("event")
+    if event == "result":
+        return "TERMINAL_RESULT"
+    if event == "tool_result":
+        return "TOOL_RESULT_EVENT"
+    if event != "step_update":
+        return "OTHER_EVENT"
+    step = row.get("step_update")
+    if not isinstance(step, dict):
+        return "STEP_UPDATE_OTHER"
+    kind = step.get("step_type")
+    if kind == "tool":
+        return "STEP_UPDATE_TOOL"
+    if kind == "tool_result":
+        return "STEP_UPDATE_TOOL_RESULT"
+    return "STEP_UPDATE_OTHER"
+
+
+def _inspect_lifecycle_trace(trace: Path) -> dict:
+    """Examine original AGY typed events without copying any raw content."""
+    records = []
+    malformed = 0
+    with trace.open("r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                malformed += 1
+                continue
+            if isinstance(row, dict):
+                records.append(row)
+
+    read_events = 0
+    events = []
+    step_indexes = {}
+    call_ids = {}
+    missing_ids = 0
+    param_digests = set()
+    strict_count = 0
+    locations = set()
+    event_positions = []
+    for index, row in enumerate(records):
+        if row.get("event") != "step_update":
+            continue
+        step = row.get("step_update")
+        if not isinstance(step, dict) or step.get("step_type") != "tool":
+            continue
+        info = step.get("tool_info")
+        if not isinstance(info, dict):
+            continue
+        name = info.get("name") or step.get("tool_name")
+        if not isinstance(name, str) or name.split(".")[-1] != "read_file":
+            continue
+        read_events += 1
+        params = info.get("parameters")
+        if not _legacy_target_reference(params):
+            continue
+        events.append(index)
+        event_positions.append(index)
+        strict_count += int(_target_argument(params))
+        locations.add(_target_reference_location(params))
+        idx = step.get("step_index")
+        if type(idx) is int:
+            step_indexes[idx] = step_indexes.get(idx, 0) + 1
+        identifier = _call_id(info, step)
+        if identifier is None:
+            missing_ids += 1
+        else:
+            call_ids[identifier] = call_ids.get(identifier, 0) + 1
+        # Compare only in-memory digests of private serialized arguments.
+        # Neither the value nor its digest is ever included in the report.
+        try:
+            serialized = json.dumps(
+                params, sort_keys=True, ensure_ascii=False, default=str)
+        except (ValueError, TypeError):
+            serialized = "<UNSERIALIZABLE>"
+        param_digests.add(hashlib.sha256(serialized.encode("utf-8")).digest())
+
+    followups = set()
+    for index in event_positions:
+        for row in records[index + 1:index + 3]:
+            followups.add(_safe_lifecycle_event_kind(row))
+
+    linked = False
+    for row in records:
+        if row.get("event") == "tool_result" and row.get("source") == "TOOL":
+            identity = row.get("tool_call_id") or row.get("call_id")
+            if isinstance(identity, str) and identity in call_ids:
+                linked = True
+        if row.get("event") == "step_update":
+            step = row.get("step_update")
+            if (isinstance(step, dict)
+                    and step.get("step_type") == "tool_result"
+                    and step.get("source") == "TOOL"):
+                identity = step.get("tool_call_id")
+                if isinstance(identity, str) and identity in call_ids:
+                    linked = True
+
+    repeat_index_groups = sum(count > 1 for count in step_indexes.values())
+    duplicate_call_ids = any(count > 1 for count in call_ids.values())
+    repeat_possible = len(events) > 1 and (
+        bool(repeat_index_groups) or duplicate_call_ids
+        or len(param_digests) < len(events))
+    if not locations:
+        location = "NONE"
+    elif len(locations) == 1:
+        location = next(iter(locations))
+    else:
+        location = "MIXED_UNTRUSTED_REFERENCES"
+    return {
+        "trace_status": "INCOMPLETE_TRACE" if malformed else "TRACE_PRESENT",
+        "read_file_tool_event_count": read_events,
+        "target_tool_event_count": len(events),
+        "known_strict_target_count": strict_count,
+        "target_reference_location": location,
+        "distinct_step_index_count": len(step_indexes),
+        "repeated_step_index_groups": repeat_index_groups,
+        "distinct_call_id_count": len(call_ids),
+        "missing_call_id_event_count": missing_ids,
+        "distinct_argument_envelope_count": len(param_digests),
+        "repeat_update_possible": repeat_possible,
+        "verified_distinct_file_reads": False,
+        "post_target_event_types": sorted(followups),
+        "linked_tool_result_observed": linked,
+        "correlation_level": (
+            "EXPLICIT_TOOL_CALL_ID" if linked else
+            "ADJACENCY_ONLY" if followups else "NO_CORRELATION"),
+        "model_ingress_verified": False,
+        "independent_binary_transport_verified": False,
+    }
+
+
+def inspect_lifecycle_session(private_root: Path, session: str) -> dict:
+    """One-time, independent, read-only lifecycle metadata analysis."""
+    priv, manifest = _read_manifest(private_root, session)
+    trials = []
+    for item in manifest["cases"]:
+        trace = priv / (item["id"] + ".ndjson")
+        row = {
+            "trial": item["id"],
+            "trace_status": "TRACE_MISSING",
+            "read_file_tool_event_count": 0,
+            "target_tool_event_count": 0,
+            "known_strict_target_count": 0,
+            "target_reference_location": "NONE",
+            "distinct_step_index_count": 0,
+            "repeated_step_index_groups": 0,
+            "distinct_call_id_count": 0,
+            "missing_call_id_event_count": 0,
+            "distinct_argument_envelope_count": 0,
+            "repeat_update_possible": False,
+            "verified_distinct_file_reads": False,
+            "post_target_event_types": [],
+            "linked_tool_result_observed": False,
+            "correlation_level": "NO_CORRELATION",
+            "model_ingress_verified": False,
+            "independent_binary_transport_verified": False,
+        }
+        if trace.is_symlink() or (trace.exists() and not _regular_file(
+                trace, MAX_TRACE_BYTES)):
+            row["trace_status"] = "UNSAFE_TRACE"
+        elif trace.exists():
+            row.update(_inspect_lifecycle_trace(trace))
+        trials.append(row)
+    return {
+        "schema": "agy_cli_audio_lifecycle_v1",
+        "session": session,
+        "model_called": False,
+        "private_evidence_modified": False,
+        "independent_binary_transport_verified": False,
+        "trials": trials,
+        "note": ("Tool step updates and adjacent events cannot alone prove "
+                 "distinct file reads or model-side binary ingestion."),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline AGY MP3 tool-result byte audit (no model requests)")
     parser.add_argument("--session", required=True)
     parser.add_argument("--private-root", type=Path, default=None)
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--inspect-shape", action="store_true",
         help="Inspect archived AGY read_file event envelopes without any private values")
+    mode.add_argument(
+        "--inspect-lifecycle", action="store_true",
+        help="Summarize call-step repetitions and typed follow-up events without model calls")
     args = parser.parse_args(argv)
     if args.private_root is None:
         local = os.environ.get("LOCALAPPDATA")
@@ -466,8 +694,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         private_root = args.private_root
     try:
-        report = (probe_session(private_root, args.session)
-                  if args.inspect_shape else audit_session(private_root, args.session))
+        report = (inspect_lifecycle_session(private_root, args.session)
+                  if args.inspect_lifecycle else
+                  probe_session(private_root, args.session)
+                  if args.inspect_shape else
+                  audit_session(private_root, args.session))
     except (ValueError, OSError):
         print(json.dumps({"schema": "agy_cli_audio_byte_audit_v1",
                           "status": "AUDIT_UNAVAILABLE_OR_INVALID_EVIDENCE",
