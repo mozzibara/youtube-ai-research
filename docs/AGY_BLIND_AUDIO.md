@@ -76,7 +76,10 @@ Each trial starts a new AGY CLI process, with:
 - `-p`, `--model gemini-3.8-flash-medium`,
   `--output-format stream-json`, `--sandbox`
 - Only `clip_00_30.mp3` in its workspace; the model is asked to
-  use `read_file` on that file alone and to write `answer.json`
+  use `read_file` on that file alone and return exactly one JSON object
+  as its final answer. It is explicitly forbidden to write any files.
+- The local Python host saves a validated final JSON response **only to
+  the private truth folder**, never into the AGY workspace.
 - Explicit separate `NO_SPEECH` and `NO_AUDIO_ACCESS` verdicts
 - Full raw AGY stream and stderr stored **only in the private folder**
 
@@ -91,12 +94,51 @@ is a no-op. The harness cannot prove permission confinement.
 
 Never run the same trial twice: existing outputs and logs are not overwritten.
 
+### Headless write_file auto-denial — v2 host-owned JSON output
+
+In a real five-trial Headless run, each MP3 read was attempted but the CLI
+later **auto-denied `write_file`** when the agent tried to save
+`answer.json`. All five runs returned an empty final response.
+
+The updated v2 prompt **never asks the agent to create any file**. Only
+`read_file` of the target MP3 is permitted. The model is asked
+to return exactly one final JSON object, and the Python host captures
+that JSON from the private `stream-json` terminal result.
+Any model-side file write invalidates a trial regardless of its transcript.
+
+**Retain the original session unchanged.** It cannot be rerun with a new
+prompt under the same trial ID because the benchmark deliberately
+prevents overwriting evidence. Start with one new speech and one new silence
+case to minimize cost:
+
+```powershell
+git pull --ff-only origin main
+$session = (python .\tools\agy_blind_audio.py prepare --speech-count 1 --silence-count 1 | ConvertFrom-Json).session
+python .\tools\agy_blind_audio.py run --session $session --trial all
+```
+
+The dry run above performs **zero model requests**. To explicitly initiate
+the two model requests (only after checking the workspaces and permissions):
+
+```powershell
+python .\tools\agy_blind_audio.py run --session $session --trial all --submit
+python .\tools\agy_blind_audio.py evaluate --session $session --max-cer 0.25
+```
+
+A 1+1 trial cannot yield the full 3+2 benchmark PASS; if both cases meet
+all behavioral checks its correct verdict is
+`PROVISIONAL_INSUFFICIENT_TRIALS`. If Headless still
+returns empty output, diagnose that **new** session offline with
+`agy_blind_diagnose.py`; do not bypass permissions or repeat
+the same trial.
+
 ### Diagnose an empty Headless SUCCESS without spending more quota
 
-A real five-trial session produced five `read_file` attempts, five
-CLI exit-zero / terminal SUCCESS events, no `answer.json`, and no
-nonempty terminal response. This means **INCOMPLETE**, not proven transcription
-failure or success.
+A real five-trial legacy v1 session produced five `read_file` attempts,
+five CLI exit-zero / terminal SUCCESS events, no `answer.json` and
+no nonempty terminal response. Local stderr fingerprints identified an
+automatic **`write_file` denial** in all five cases. This means
+**INCOMPLETE**, not proven transcription failure or success.
 
 AGY Headless may soft-deny unapproved tool operations and still exit zero.
 A terminal SUCCESS with an empty response has also been reported in AGY.
@@ -184,7 +226,7 @@ original AGY stdout/stderr and any preexisting answer are never overwritten.
 means the response cannot be recovered from this format. It is **not** evidence
 that the audio was unheard.
 
-For future runs, the harness also automatically attempts this strict recovery
+For future runs, the harness automatically attempts this strict recovery
 once after a successful headless request. It still records the provenance
 separately; a model reply is not proof of the backend binary transport.
 
@@ -203,7 +245,9 @@ A behavioral PASS requires:
 1. At least 3 speech and 2 silence trials fully completed.
 2. A successful AGY terminal event **and** actual `read_file` tool
    steps targeting `clip_00_30.mp3` in each trial's structured event log,
-   with no other model tool calls except allowed `write_file`.
+   with **no other model tool calls**, including `write_file`. For
+   the v2 output contract, the only accepted answer source is
+   `private_terminal_recovery` from the host.
 3. For **every** speech trial, nonempty model transcription, six-digit Korean
    nonce correctly heard and character error rate (CER) at most 0.25.
 4. For **every** silence trial, explicit `NO_SPEECH` with no segments
