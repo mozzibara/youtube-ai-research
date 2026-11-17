@@ -67,3 +67,8 @@ flash_audio.json
 flash_mp4.json
 automation_status*.json
 window_diagnostics*.json
+
+# All blind audio media/keys/traces must remain private.
+agy-blind-*/
+agy_blind_private/
+answer.json
