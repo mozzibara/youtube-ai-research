@@ -570,6 +570,107 @@ class BlindAudioTests(unittest.TestCase):
             self.assertEqual(item["output_contract"], "UNKNOWN_CONTRACT")
             self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
 
+    def test_invalid_silence_tone_claim_is_decisive_failure_not_missing(self):
+        """Match observed real case: NO_SPEECH/TONE/int=0 for a silent MP3."""
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            case_id = "case-000000000004"
+            trace = private / (case_id + ".ndjson")
+            events = [json.loads(x) for x in trace.read_text(
+                encoding="utf-8").splitlines()]
+            events[-1]["result"]["response"] = json.dumps({
+                "verdict": "NO_SPEECH",
+                "acoustic_class": "TONE",
+                "audio_analyzed": True,
+                "beep_count": 0,
+                "segments": [],
+                "private_unrecognized": "DO_NOT_PRINT_PRIVATE_CONTENT"
+            })
+            trace.write_text("\n".join(json.dumps(x) for x in events) + "\n",
+                             encoding="utf-8")
+            original_bytes = trace.read_bytes()
+            with patch.object(mod.subprocess, "run",
+                              side_effect=AssertionError("Must not replay AGY")):
+                recovered = mod.recover(private.parent, SESSION)
+            silent = next(x for x in recovered["cases"] if x["trial"] == case_id)
+            self.assertEqual(silent["recovery"], "UNPARSEABLE_TERMINAL_JSON")
+            self.assertFalse((private / "recoveries" /
+                              (case_id + ".response.json")).exists())
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(report["all_complete"])
+            self.assertEqual(report["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            self.assertTrue(report["confirmed_acoustic_misclassification"])
+            case = next(x for x in report["trials"] if x["trial"] == case_id)
+            self.assertFalse(case["pass"])
+            self.assertEqual(case["verdict"], "MISSING")
+            self.assertEqual(case["observed_rejected_acoustic_class"], "TONE")
+            self.assertEqual(case["rejected_terminal_validation_category"],
+                             "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT")
+            self.assertTrue(case["observed_acoustic_misclassification"])
+            self.assertEqual(case["trial_outcome"],
+                             "FAIL_OBSERVED_ACOUSTIC_MISCLASSIFICATION")
+            self.assertEqual(original_bytes, trace.read_bytes())
+            self.assertNotIn("DO_NOT_PRINT_PRIVATE_CONTENT",
+                             json.dumps(report, ensure_ascii=False))
+
+    def test_ambiguous_or_absent_output_stays_incomplete_not_auto_failed(self):
+        for raw in ["garbled terminal text",
+                    json.dumps({"verdict": "NO_SPEECH",
+                                "acoustic_class": "INVALID_PRIVATE_LABEL",
+                                "audio_analyzed": True,
+                                "beep_count": 0, "segments": []}),
+                    ""]:
+            with self.subTest(response_length=len(raw)):
+                with tempfile.TemporaryDirectory() as td:
+                    _, private = self._three_condition_fixture(td)
+                    case_id = "case-000000000004"
+                    trace = private / (case_id + ".ndjson")
+                    rows = [json.loads(x) for x in trace.read_text(
+                        encoding="utf-8").splitlines()]
+                    rows[-1]["result"]["response"] = raw
+                    trace.write_text(
+                        "\n".join(json.dumps(x) for x in rows) + "\n",
+                        encoding="utf-8")
+                    report = mod.evaluate(private.parent, SESSION)
+                    self.assertEqual(report["overall"], "INCOMPLETE")
+                    self.assertFalse(report["confirmed_acoustic_misclassification"])
+                    case = next(x for x in report["trials"] if x["trial"] == case_id)
+                    self.assertEqual(case["verdict"], "MISSING")
+                    self.assertFalse(case["observed_acoustic_misclassification"])
+                    self.assertEqual(case["trial_outcome"],
+                                     "INCOMPLETE_UNRECOVERED_TERMINAL_RESPONSE")
+                    self.assertNotIn("INVALID_PRIVATE_LABEL", json.dumps(report))
+
+    def test_wrong_class_without_provenance_cannot_be_confirmed(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._three_condition_fixture(td)
+            cid = "case-000000000004"
+            trace = private / (cid + ".ndjson")
+            rows = [json.loads(x) for x in trace.read_text(
+                encoding="utf-8").splitlines()]
+            rows[-1]["result"]["response"] = json.dumps({
+                "verdict": "NO_SPEECH",
+                "acoustic_class": "TONE",
+                "audio_analyzed": True,
+                "beep_count": 0, "segments": []})
+            # Drop the read_file provenance: no confident attribution.
+            rows = [x for x in rows if x.get("event") != "step_update"]
+            trace.write_text("\n".join(json.dumps(x) for x in rows) + "\n",
+                             encoding="utf-8")
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(report["overall"], "INCOMPLETE")
+            self.assertFalse(report["confirmed_acoustic_misclassification"])
+
+    def test_speech_missing_answer_has_no_artificial_cer_of_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._fixture(td)
+            (runtime / "case-000000000000" / "answer.json").unlink()
+            report = mod.evaluate(private.parent, SESSION)
+            case = report["trials"][0]
+            self.assertEqual(report["overall"], "INCOMPLETE")
+            self.assertIsNone(case["cer"])
+            self.assertIsNone(case["nonce_recognized"])
+
     def test_evaluation_rejects_modified_audio(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, private = self._fixture(td)
