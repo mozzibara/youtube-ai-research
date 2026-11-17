@@ -375,9 +375,9 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                        for x in cases)
     sufficient = len(speech) >= 3 and len(silence) >= 2
     overall = ("INCOMPLETE" if not all_complete else
-               "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
-               "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION" if all(x["pass"] for x in cases)
-               else "FAIL_AUDIO_DISCRIMINATION")
+               "FAIL_AUDIO_DISCRIMINATION" if not all(x["pass"] for x in cases)
+               else "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
+               "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
     report = {"schema": "agy_blind_audio_evaluation_v1", "session": session,
               "total_trials": len(cases), "speech_trials": len(speech),
               "silence_trials": len(silence), "all_complete": all_complete,
