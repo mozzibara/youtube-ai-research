@@ -35,6 +35,7 @@ ALLOW_EXACT = {
     "tools/check_public_snapshot.py",
     "tools/agy_media_probe.py",
     "tools/agy_blind_audio.py",
+    "tools/agy_blind_diagnose.py",
     "scripts/synthesize-ko-sapi.ps1",
     "docs/AGY_BLIND_AUDIO.md",
     "tools/inspect_agy_read_file_trace.py",
