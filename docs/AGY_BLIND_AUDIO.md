@@ -576,3 +576,49 @@ path. Use the shape-probe output to design a constrained parser for the
 actually observed AGY schema, with synthetic red/green fixtures. Do not
 accept an arbitrary nested string match as proof of audio transfer or
 silently turn the known five trials into a `PASS`.
+
+
+### Offline lifecycle inspection after 2 read_file events per case
+
+The archived `blind-ecc67afd26534f13` session had **two**
+`read_file` step-update events in each of five cases, an object-shaped
+parameter envelope with two unrecognized keys, and no inline
+`tool_info.result/output/response` fields. These findings are already
+recorded and must not be re-collected merely to repeat the same checks.
+
+To determine if the two *events* share a step index or call identifier,
+and what typed events directly follow the read calls, run this **new**
+offline inspection once:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-lifecycle
+```
+
+This produces only allowlisted categories and numeric counts:
+`target_tool_event_count`, `distinct_step_index_count`,
+`repeated_step_index_groups`, `distinct_call_id_count`,
+`missing_call_id_event_count`, `distinct_argument_envelope_count`,
+`repeat_update_possible`, `target_reference_location`,
+`post_target_event_types`, and `correlation_level`.
+Raw step IDs, tool call IDs, argument key names/values, reference paths,
+transcripts, decoded media bytes, or model output are never printed.
+
+- Two step events with the **same step index or tool call ID** may be
+  repeated progress updates of **one** actual read; the report never
+  claims they prove two separate reads.
+- A target reference in an unknown field is classified as
+  `DIRECT_VALUE`, `NESTED_VALUE`, or `KEY_ONLY`, without exposing
+  its key name or promoting it to an approved file-path binding.
+- A following `GENERIC` or terminal event yields
+  `ADJACENCY_ONLY`: mere adjacency is **not a tool receipt**.
+  `EXPLICIT_TOOL_CALL_ID` requires an allowlisted TOOL-source result
+  and a matching ID, but still does **not** prove model ingress.
+- `verified_distinct_file_reads`, `model_ingress_verified`, and
+  `independent_binary_transport_verified` remain `false` in all
+  CLI-only lifecycle reports.
+
+The command does not modify private files or invoke AGY. Its purpose
+is to identify whether a narrow, evidence-backed follow-up parser is
+possible. Avoid adding speculative aliases or treating untrusted
+tool-call argument text as proof of MP3 byte delivery.
