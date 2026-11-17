@@ -570,6 +570,113 @@ class BlindAudioTests(unittest.TestCase):
             self.assertEqual(item["output_contract"], "UNKNOWN_CONTRACT")
             self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
 
+    def test_invalid_tone_out_of_range_integer_is_definite_count_failure(self):
+        """Real-case shape: TONE/NO_SPEECH, integer outside 2..5, no recovery."""
+        for invalid_count in (0, 1, 6, -1):
+            with self.subTest(invalid_count=invalid_count):
+                with tempfile.TemporaryDirectory() as td:
+                    _, private = self._three_condition_fixture(td)
+                    cid = "case-000000000003"
+                    trace = private / (cid + ".ndjson")
+                    rows = [json.loads(x) for x in trace.read_text(
+                        encoding="utf-8").splitlines()]
+                    rows[-1]["result"]["response"] = json.dumps({
+                        "verdict": "NO_SPEECH", "audio_analyzed": True,
+                        "acoustic_class": "TONE",
+                        "beep_count": invalid_count,
+                        "segments": [],
+                        "secret": "PRIVATE_TONE_NOT_FOR_OUTPUT"})
+                    trace.write_text(
+                        "\n".join(json.dumps(x) for x in rows) + "\n",
+                        encoding="utf-8")
+                    original_bytes = trace.read_bytes()
+                    with patch.object(mod.subprocess, "run",
+                                      side_effect=AssertionError("Must not replay model")):
+                        recovery = mod.recover(private.parent, SESSION)
+                    candidate = next(x for x in recovery["cases"]
+                                     if x["trial"] == cid)
+                    self.assertEqual(candidate["recovery"], "UNPARSEABLE_TERMINAL_JSON")
+                    self.assertFalse((private / "recoveries" /
+                                      (cid + ".response.json")).exists())
+                    report = mod.evaluate(private.parent, SESSION)
+                    self.assertFalse(report["all_complete"])
+                    self.assertTrue(report["confirmed_tone_count_error"])
+                    self.assertEqual(report["overall"], "FAIL_AUDIO_DISCRIMINATION")
+                    tone = next(x for x in report["trials"] if x["trial"] == cid)
+                    self.assertFalse(tone["pass"])
+                    self.assertEqual(tone["verdict"], "MISSING")
+                    self.assertTrue(tone["observed_tone_count_error"])
+                    self.assertEqual(tone["trial_outcome"],
+                                     "FAIL_OBSERVED_TONE_COUNT_ERROR")
+                    self.assertEqual(tone["tone_count_error_evidence_source"],
+                                     "REJECTED_TERMINAL_RESPONSE")
+                    self.assertEqual(tone["rejected_terminal_validation_category"],
+                                     "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT")
+                    self.assertEqual(original_bytes, trace.read_bytes())
+                    self.assertNotIn("PRIVATE_TONE_NOT_FOR_OUTPUT", json.dumps(report))
+
+    def test_valid_tone_wrong_private_count_is_definite_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            mod.recover(private.parent, SESSION)
+            cid = "case-000000000003"
+            path = private / "recoveries" / (cid + ".response.json")
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            candidate["beep_count"] = 2  # Fixture truth is 3.
+            path.write_text(json.dumps(candidate), encoding="utf-8")
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertTrue(report["all_complete"])
+            self.assertTrue(report["confirmed_tone_count_error"])
+            self.assertEqual(report["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            trial = next(x for x in report["trials"] if x["trial"] == cid)
+            self.assertTrue(trial["observed_tone_count_error"])
+            self.assertFalse(trial["tone_count_match"])
+            self.assertEqual(trial["tone_count_error_evidence_source"],
+                             "VALIDATED_PRIVATE_TERMINAL_RESPONSE")
+            self.assertEqual(trial["trial_outcome"],
+                             "FAIL_OBSERVED_TONE_COUNT_ERROR")
+
+    def test_tone_ambiguous_count_or_missing_provenance_not_confirmed(self):
+        for invalid_value in (None, "2", True):
+            with self.subTest(invalid_value=invalid_value):
+                with tempfile.TemporaryDirectory() as td:
+                    _, private = self._three_condition_fixture(td)
+                    cid = "case-000000000003"
+                    trace = private / (cid + ".ndjson")
+                    rows = [json.loads(x) for x in trace.read_text(
+                        encoding="utf-8").splitlines()]
+                    rows[-1]["result"]["response"] = json.dumps({
+                        "verdict": "NO_SPEECH", "audio_analyzed": True,
+                        "acoustic_class": "TONE",
+                        "beep_count": invalid_value, "segments": []
+                    })
+                    trace.write_text(
+                        "\n".join(json.dumps(x) for x in rows) + "\n",
+                        encoding="utf-8")
+                    report = mod.evaluate(private.parent, SESSION)
+                    self.assertFalse(report["confirmed_tone_count_error"])
+                    self.assertEqual(report["overall"], "INCOMPLETE")
+                    tone = next(x for x in report["trials"] if x["trial"] == cid)
+                    self.assertFalse(tone["observed_tone_count_error"])
+                    self.assertEqual(tone["trial_outcome"],
+                                     "INCOMPLETE_UNRECOVERED_TERMINAL_RESPONSE")
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            cid = "case-000000000003"
+            trace = private / (cid + ".ndjson")
+            rows = [json.loads(x) for x in trace.read_text(
+                encoding="utf-8").splitlines()]
+            rows[-1]["result"]["response"] = json.dumps({
+                "verdict": "NO_SPEECH", "audio_analyzed": True,
+                "acoustic_class": "TONE", "beep_count": 0, "segments": []})
+            rows = [x for x in rows if x.get("event") != "step_update"]
+            trace.write_text(
+                "\n".join(json.dumps(x) for x in rows) + "\n",
+                encoding="utf-8")
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(report["confirmed_tone_count_error"])
+            self.assertEqual(report["overall"], "INCOMPLETE")
+
     def test_valid_silence_tone_claim_is_confirmed_acoustic_failure(self):
         """Strict-valid TONE JSON on SILENCE must be a confirmed FAIL."""
         with tempfile.TemporaryDirectory() as td:

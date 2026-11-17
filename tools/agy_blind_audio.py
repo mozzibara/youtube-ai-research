@@ -789,6 +789,8 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
         rejected_response_acoustic_class = None
         observed_wrong_class = False
         wrong_class_evidence_source = None
+        observed_tone_count_error = False
+        tone_count_error_evidence_source = None
         # A valid recovered JSON is still a failed experiment if the model
         # reports a sound class different from the secret input condition.
         # The previous detector covered only rejected terminal JSON.
@@ -804,6 +806,22 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                 and not provenance["other_tool_calls_observed"]):
             observed_wrong_class = True
             wrong_class_evidence_source = "VALIDATED_PRIVATE_TERMINAL_RESPONSE"
+        # For a valid answer, a wrong private beep count is a definite
+        # behavioral error even when the acoustic class itself is correct.
+        if (output_contract == ACOUSTIC_CONTRACT
+                and source == "private_terminal_recovery"
+                and condition == "tone"
+                and verdict == "NO_SPEECH" and analyzed and not text.strip()
+                and acoustic_class == "TONE"
+                and type(reported_beeps) is int
+                and item.get("beep_count") in TONE_COUNTS
+                and reported_beeps != item["beep_count"]
+                and matched and completed
+                and provenance["mp3_read_call_observed"]
+                and provenance["terminal_success_observed"]
+                and not provenance["other_tool_calls_observed"]):
+            observed_tone_count_error = True
+            tone_count_error_evidence_source = "VALIDATED_PRIVATE_TERMINAL_RESPONSE"
         if (output_contract == ACOUSTIC_CONTRACT and source == "missing"
                 and matched and completed and
                 provenance["mp3_read_call_observed"] and
@@ -829,6 +847,26 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                     and rejected_response_acoustic_class != condition.upper())
                 if observed_wrong_class:
                     wrong_class_evidence_source = "REJECTED_TERMINAL_RESPONSE"
+                # For an actual tone file, NO_SPEECH/TONE/true with 0
+                # segments and an integer beep count can be rejected by
+                # this schema check only when the reported count is
+                # *outside* the allowable 2..5. The private ground truth
+                # is always in 2..5; therefore the count is conclusively
+                # wrong without displaying the value or relaxing parsing.
+                observed_tone_count_error = bool(
+                    condition == "tone"
+                    and type(item.get("beep_count")) is int
+                    and item["beep_count"] in TONE_COUNTS
+                    and rejected_response_category ==
+                        "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT"
+                    and evidence["reported_verdict"] == "NO_SPEECH"
+                    and evidence["reported_acoustic_class"] == "TONE"
+                    and evidence["reported_audio_analyzed"] is True
+                    and evidence["reported_segments_count"] == 0
+                    and evidence["reported_beep_count_type"] == "INTEGER"
+                )
+                if observed_tone_count_error:
+                    tone_count_error_evidence_source = "REJECTED_TERMINAL_RESPONSE"
         host_output_isolation = (output_contract not in {
             "host_terminal_json_v2", ACOUSTIC_CONTRACT}
             or source == "private_terminal_recovery")
@@ -847,6 +885,8 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
             "PASS" if ok else
             "FAIL_OBSERVED_ACOUSTIC_MISCLASSIFICATION"
             if observed_wrong_class else
+            "FAIL_OBSERVED_TONE_COUNT_ERROR"
+            if observed_tone_count_error else
             "INCOMPLETE_UNRECOVERED_TERMINAL_RESPONSE"
             if source == "missing" else
             "FAIL_STRICT_EVALUATION"
@@ -864,6 +904,8 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "observed_rejected_acoustic_class": rejected_response_acoustic_class,
                       "observed_acoustic_misclassification": observed_wrong_class,
                       "acoustic_misclassification_evidence_source": wrong_class_evidence_source,
+                      "observed_tone_count_error": observed_tone_count_error,
+                      "tone_count_error_evidence_source": tone_count_error_evidence_source,
                       "trial_outcome": trial_outcome,
                       "host_output_isolation": host_output_isolation,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
@@ -884,8 +926,11 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
     # Contract completeness remains false; never create a passing answer.
     confirmed_misclassification = any(
         x["observed_acoustic_misclassification"] for x in cases)
+    confirmed_tone_count_error = any(
+        x["observed_tone_count_error"] for x in cases)
     overall = (
-        "FAIL_AUDIO_DISCRIMINATION" if confirmed_misclassification else
+        "FAIL_AUDIO_DISCRIMINATION"
+        if confirmed_misclassification or confirmed_tone_count_error else
         "INCOMPLETE" if not all_complete else
         "FAIL_AUDIO_DISCRIMINATION" if not all(x["pass"] for x in cases) else
         "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
@@ -896,6 +941,7 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
               "tone_trials": len(tones), "silence_trials": len(silence),
               "all_complete": all_complete,
               "confirmed_acoustic_misclassification": confirmed_misclassification,
+              "confirmed_tone_count_error": confirmed_tone_count_error,
               "threshold_cer": threshold, "overall": overall, "trials": cases,
               "independent_binary_transport_verified": False,
               "note": "Behavioral blind test; no raw transcript or answer key is printed."}
