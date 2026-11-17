@@ -453,6 +453,14 @@ def probe_session(private_root: Path, session: str) -> dict:
 # These fixed output categories never depend on arbitrary input key names.
 LIFECYCLE_TARGET = "clip_00_30.mp3"
 LIFECYCLE_MAX_DEPTH = 12
+LIFECYCLE_STATUSES = frozenset({
+    "RUNNING", "DONE", "SUCCESS", "FAILED", "ERROR",
+    "PENDING", "CANCELLED", "COMPLETED", "REQUESTED",
+})
+
+
+def _safe_lifecycle_status(value: object) -> str:
+    return value if isinstance(value, str) and value in LIFECYCLE_STATUSES else "OTHER"
 
 
 def _target_reference_location(params: object) -> str:
@@ -532,6 +540,8 @@ def _inspect_lifecycle_trace(trace: Path) -> dict:
     read_events = 0
     events = []
     step_indexes = {}
+    step_status_groups = {}
+    step_statuses = set()
     call_ids = {}
     missing_ids = 0
     param_digests = set()
@@ -561,6 +571,11 @@ def _inspect_lifecycle_trace(trace: Path) -> dict:
         idx = step.get("step_index")
         if type(idx) is int:
             step_indexes[idx] = step_indexes.get(idx, 0) + 1
+        # Status values are never copied verbatim unless allowlisted.
+        state = _safe_lifecycle_status(step.get("status"))
+        step_statuses.add(state)
+        if type(idx) is int:
+            step_status_groups.setdefault(idx, set()).add(state)
         identifier = _call_id(info, step)
         if identifier is None:
             missing_ids += 1
@@ -596,6 +611,8 @@ def _inspect_lifecycle_trace(trace: Path) -> dict:
                     linked = True
 
     repeat_index_groups = sum(count > 1 for count in step_indexes.values())
+    same_step_status_change = any(
+        len(states - {"OTHER"}) > 1 for states in step_status_groups.values())
     duplicate_call_ids = any(count > 1 for count in call_ids.values())
     repeat_possible = len(events) > 1 and (
         bool(repeat_index_groups) or duplicate_call_ids
@@ -618,6 +635,8 @@ def _inspect_lifecycle_trace(trace: Path) -> dict:
         "missing_call_id_event_count": missing_ids,
         "distinct_argument_envelope_count": len(param_digests),
         "repeat_update_possible": repeat_possible,
+        "tool_step_statuses": sorted(step_statuses),
+        "same_step_status_change_observed": same_step_status_change,
         "verified_distinct_file_reads": False,
         "post_target_event_types": sorted(followups),
         "linked_tool_result_observed": linked,
@@ -648,6 +667,8 @@ def inspect_lifecycle_session(private_root: Path, session: str) -> dict:
             "missing_call_id_event_count": 0,
             "distinct_argument_envelope_count": 0,
             "repeat_update_possible": False,
+            "tool_step_statuses": [],
+            "same_step_status_change_observed": False,
             "verified_distinct_file_reads": False,
             "post_target_event_types": [],
             "linked_tool_result_observed": False,
