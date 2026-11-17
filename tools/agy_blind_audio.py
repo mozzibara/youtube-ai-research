@@ -234,10 +234,12 @@ def run_trial(private_root: Path, session: str, case_id: str, submit: bool,
                                   stderr=stderr, timeout=timeout_seconds + 20,
                                   check=False)
             status = {"submitted": True, "exit_code": proc.returncode,
-                      "timed_out": False, "auto_approve": auto_approve}
+                      "timed_out": False, "auto_approve": auto_approve,
+                      "output_contract": "host_terminal_json_v2"}
         except subprocess.TimeoutExpired:
             status = {"submitted": True, "exit_code": None,
-                      "timed_out": True, "auto_approve": auto_approve}
+                      "timed_out": True, "auto_approve": auto_approve,
+                      "output_contract": "host_terminal_json_v2"}
     _json(status_file, status)
     # The model must not write answer.json. Any unexpected model-created answer
     # is retained as evidence but cannot make a clean read-only trial pass.
@@ -485,8 +487,10 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
         verdict, text, analyzed = _read_answer(
             original if original.exists() else recovered)
         status_path = priv / (item["id"] + ".status.json")
+        output_contract = "legacy_workspace_answer"
         try:
             status = json.loads(status_path.read_text(encoding="utf-8"))
+            output_contract = status.get("output_contract", "legacy_workspace_answer")
             completed = (status.get("exit_code") == 0 and
                          status.get("submitted") is True and not status.get("timed_out"))
         except (OSError, ValueError):
@@ -495,7 +499,9 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
         condition = item["kind"]
         error = cer(item["reference"], text) if condition == "speech" else None
         nonce = normalize(item["nonce"]) in normalize(text) if condition == "speech" else None
-        ok = bool(matched and completed and analyzed
+        host_output_isolation = (output_contract != "host_terminal_json_v2"
+                                 or source == "private_terminal_recovery")
+        ok = bool(matched and completed and analyzed and host_output_isolation
                   and provenance["mp3_read_call_observed"]
                   and provenance["terminal_success_observed"]
                   and not provenance["other_tool_calls_observed"] and (
@@ -508,6 +514,8 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "nonce_recognized": nonce, "audio_analyzed_reported": analyzed,
                       "audio_hash_matched": matched, "cli_success": completed,
                       "answer_source": source,
+                      "output_contract": output_contract,
+                      "host_output_isolation": host_output_isolation,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
                       "other_tool_calls_observed": provenance["other_tool_calls_observed"],
                       "terminal_success_observed": provenance["terminal_success_observed"],
