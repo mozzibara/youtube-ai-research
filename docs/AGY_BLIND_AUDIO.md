@@ -479,3 +479,58 @@ or imply zero error in real-world news transcription.
   Actual speech synthesis and headless AGY response must be checked on Windows.
 - AGY headless `stream-json` includes tool activity; unknown protocol
   variants fail closed rather than invent success.
+
+## Offline MP3 byte visibility audit (separate from acoustic scoring)
+
+Run this new command on **already archived** session data. It is read-only
+and makes **zero AGY/model calls**. Do not repeat `evaluate`, `recover`,
+or completed trials merely to conduct this audit.
+
+```powershell
+$session = "blind-ecc67afd26534f13"
+python .\tools\agy_audio_transport_audit.py --session $session
+```
+
+The default private root is
+`%LOCALAPPDATA%\AGYBlindAudio\truth`. To use a different private root,
+supply `--private-root` pointing to the **truth root**, not its session
+subdirectory. The reporter reads the original manifest and per-trial
+`*.ndjson` streams without storing, changing, or emitting audio content,
+ground truth, model transcripts, original paths, or credential values.
+
+The meter accepts two carefully scoped sources of CLI tool-result bytes:
+(1) an audio MIME + base64 payload nested under `tool_info.result/output/response`
+for the **target** `read_file` event; or (2) a separately typed `TOOL`
+result whose `tool_call_id` matches that target event. Adjacent generic
+messages, model-authored JSON, tool-call arguments, filenames, MIME hints,
+and arbitrary transcript text **never** count as byte transport evidence.
+A matched payload must decode to the **exact** locally archived MP3 bytes,
+with the original private manifest's SHA-256 also matching the source file.
+
+Interpret `assessment` as follows:
+
+- `MATCHED_CLI_TOOL_RESULT_BYTES`: exact source MP3 bytes appeared in
+  a correlated, structured AGY CLI tool result. This is a **CLI-stream
+  byte match**, *not* independently proven model ingestion.
+- `NO_TOOL_RESULT_AUDIO_BYTES`: an MP3 read call occurred, but the stream
+  exposed no verifiable inline audio bytes. This is **inconclusive**, not
+  evidence that the model did not receive audio.
+- `CLI_TOOL_RESULT_BYTES_MISMATCH`: at least one decoded audio payload
+  differed from the MP3. Transcoding, a different tool artifact, or faulty
+  source correlation must be investigated without rewriting the archive.
+- `INVALID_TOOL_RESULT_ENCODING`, `INCOMPLETE_TRACE`,
+  `UNSAFE_TRACE`, `MEDIA_HASH_MISMATCH`, or `TRACE_MISSING`:
+  the available artifacts cannot support an affirmative byte match.
+
+Both `model_ingress_verified` and
+`independent_binary_transport_verified` deliberately remain
+`false` for **every** possible CLI-only audit outcome. This avoids
+confusing local tool-result visibility with an authenticated trace at
+the provider's multimodal request boundary. Confirming provider/model
+ingress requires a separately trusted observation of the actual request
+media payload (or an authenticated provider-side receipt); neither is
+available merely from `stream-json`. The tool neither intercepts TLS
+credentials nor changes the user's AGY permissions.
+
+CI uses fabricated MP3-like bytes and synthetic tool event fixtures only.
+Real private audio is never published to Git or GitHub Actions.
