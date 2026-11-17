@@ -432,7 +432,7 @@ def _parse_terminal_json_response(
     if contract == ACOUSTIC_CONTRACT:
         acoustic_class = value.get("acoustic_class")
         beep_count = value.get("beep_count")
-        if acoustic_class not in ACOUSTIC_CLASSES:
+        if not isinstance(acoustic_class, str) or acoustic_class not in ACOUSTIC_CLASSES:
             return None
         if (value["verdict"] == "AUDIO_TRANSCRIBED" and not
                 (acoustic_class == "SPEECH" and type(beep_count) is int
