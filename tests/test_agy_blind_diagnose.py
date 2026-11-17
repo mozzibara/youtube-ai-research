@@ -85,6 +85,87 @@ class DiagnosisTests(unittest.TestCase):
         self.assertNotIn("MY_SECRET_TOOL", json.dumps(result))
         self.assertNotIn("MY_PRIVATE_EVENT", json.dumps(result))
 
+    def test_headless_auto_denial_fingerprint_redacts_stderr(self):
+        stderr = (
+            'jetski: no output produced — a tool required the "read_file" '
+            "permission that headless mode cannot prompt for, so it was "
+            "auto-denied. Private file: C:/private/secret_token. "
+            "Add permissions.allow in settings.json."
+        )
+        with tempfile.TemporaryDirectory() as td:
+            result = self._trace(Path(td), self._rows(), stderr=stderr)
+        self.assertTrue(result["stderr_permission_denial_hint"])
+        fp = result["stderr_permission_fingerprint"]
+        self.assertEqual(fp["signature"], "HEADLESS_AUTO_DENIAL")
+        self.assertIn("read_file", fp["known_tools_mentioned"])
+        self.assertEqual(fp["headless_required_permission_kind"], "read_file")
+        self.assertEqual(result["diagnosis"], "POSSIBLE_TOOL_PERMISSION_DENIAL_OR_ERROR")
+        as_json = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("C:/private", as_json)
+        self.assertNotIn("secret_token", as_json)
+        self.assertNotIn("permissions.allow", as_json)
+        self.assertNotIn("jetski", as_json)
+
+    def test_explicit_user_deny_rule_and_other_categories(self):
+        fingerprint = mod.classify_stderr(
+            'Permission check failed for command. Matches user-configured deny rule. '
+            'C:/private/do-not-share'
+        )
+        self.assertEqual(fingerprint["signature"], "EXPLICIT_USER_DENY_RULE")
+        self.assertIn("command", fingerprint["known_tools_mentioned"])
+        self.assertNotIn("C:/private", json.dumps(fingerprint))
+        sandbox = mod.classify_stderr("AppContainer denied read_file")
+        self.assertEqual(sandbox["signature"], "SANDBOX_OR_APPCONTAINER_RESTRICTION")
+        generic = mod.classify_stderr("Permission denied for read_file.")
+        self.assertEqual(generic["signature"], "GENERIC_PERMISSION_DENIAL")
+        none = mod.classify_stderr("Everything is normal.")
+        self.assertEqual(none["signature"], "NO_DENIAL_PATTERN")
+        self.assertEqual(none["known_tools_mentioned"], [])
+
+    def test_required_permission_type_is_allowlisted_not_raw(self):
+        known = mod.classify_stderr(
+            'a tool required the "write_file" permission that headless mode '
+            'cannot prompt for, so it was auto-denied'
+        )
+        self.assertEqual(known["headless_required_permission_kind"], "write_file")
+        unknown = mod.classify_stderr(
+            'a tool required the "private_secret_function" permission that '
+            'headless mode cannot prompt for, so it was auto-denied'
+        )
+        self.assertEqual(unknown["headless_required_permission_kind"],
+                         "UNKNOWN_OR_NOT_STATED")
+        self.assertNotIn("private_secret_function", json.dumps(unknown))
+        self.assertEqual(mod.classify_stderr(
+            "Permission denied for read_file")["headless_required_permission_kind"],
+            "UNKNOWN_OR_NOT_STATED")
+
+    def test_unknown_log_values_and_model_payloads_are_never_printed(self):
+        rows = self._rows()
+        rows.insert(2, {"event": "step_update", "step_update": {
+            "step_index": 2, "step_type": "agent_response",
+            "content": "PRIVATE_TRANSCRIPT_TEXT_57",
+            "message": "SENSITIVE_CONTENT_90",
+            "x-secret-payload": "MY_SECRET_PAYLOAD"}})
+        with tempfile.TemporaryDirectory() as td:
+            result = self._trace(Path(td), rows, stderr="ACCESS DENIED!")
+        self.assertEqual(
+            result["agent_response_known_payload_key_counts"],
+            {"content": 1, "message": 1}
+        )
+        self.assertNotIn("PRIVATE_TRANSCRIPT", json.dumps(result))
+        self.assertNotIn("SENSITIVE_CONTENT", json.dumps(result))
+        self.assertNotIn("MY_SECRET_PAYLOAD", json.dumps(result))
+        self.assertTrue(result["stderr_permission_denial_hint"])
+
+    def test_stderr_quota_hint_is_separate_from_permission_denial(self):
+        with tempfile.TemporaryDirectory() as td:
+            result = self._trace(Path(td), self._rows(),
+                                 stderr="RESOURCE_EXHAUSTED 429 quota")
+        fp = result["stderr_permission_fingerprint"]
+        self.assertTrue(fp["stderr_has_auth_or_quota_hint"])
+        self.assertEqual(fp["signature"], "NO_DENIAL_PATTERN")
+        self.assertFalse(result["stderr_permission_denial_hint"])
+
     def test_manifest_summary_without_publishing_ground_truth(self):
         with tempfile.TemporaryDirectory() as td:
             private = Path(td) / "truth"

@@ -21,6 +21,65 @@ DENIAL = re.compile(
     r"(?:tool|permission) (?:is )?not allowed",
     re.IGNORECASE,
 )
+# These categories are evidence labels, not a claim about the root cause.
+# Never output matched excerpts, full lines, or unknown/dynamic regex groups.
+PERMISSION_SIGNATURES = (
+    ("HEADLESS_AUTO_DENIAL", re.compile(
+        r"auto[ -]?denied|headless.{0,120}cannot prompt|"
+        r"permission.{0,120}headless.{0,120}prompt",
+        re.IGNORECASE | re.DOTALL)),
+    ("EXPLICIT_USER_DENY_RULE", re.compile(
+        r"user[- ]configured deny rule|matches.{0,100}deny rule|"
+        r"explicit.{0,80}deny rule", re.IGNORECASE | re.DOTALL)),
+    ("SANDBOX_OR_APPCONTAINER_RESTRICTION", re.compile(
+        r"appcontainer.{0,100}(?:denied|blocked|forbidden)|"
+        r"sandbox.{0,100}(?:denied|blocked|not permitted)|"
+        r"(?:denied|blocked).{0,100}(?:sandbox|appcontainer)",
+        re.IGNORECASE | re.DOTALL)),
+    ("FILESYSTEM_ACCESS_DENIED", re.compile(
+        r"(?:EACCES|EPERM)\b|access is denied|"
+        r"(?:filesystem|file system).{0,80}permission denied",
+        re.IGNORECASE)),
+    ("GENERIC_PERMISSION_DENIAL", DENIAL),
+)
+KNOWN_TOOL_MENTIONS = frozenset({"read_file", "write_file", "command", "list_dir"})
+KNOWN_RESPONSE_PAYLOAD_KEYS = frozenset({
+    "text_delta", "text", "content", "message", "response", "output",
+})
+
+
+def classify_stderr(raw: str) -> dict:
+    """Return allowlisted presence bits only; nothing from stderr is echoed."""
+    categories = [name for name, pattern in PERMISSION_SIGNATURES
+                  if pattern.search(raw)]
+    # More specific categories take precedence over generic DENIAL.
+    signature = next((cat for cat in categories
+                      if cat != "GENERIC_PERMISSION_DENIAL"),
+                     "GENERIC_PERMISSION_DENIAL" if categories else "NO_DENIAL_PATTERN")
+    required_match = re.search(
+        r"tool required the [\"']([a-z_]+)[\"'] permission",
+        raw, re.IGNORECASE
+    )
+    required_kind = (required_match.group(1).lower()
+                     if required_match else "")
+    required_kind = (required_kind
+                     if required_kind in KNOWN_TOOL_MENTIONS
+                     else "UNKNOWN_OR_NOT_STATED")
+    mentioned = sorted(tool for tool in KNOWN_TOOL_MENTIONS
+                       if re.search(r"(?<![a-z_])" + re.escape(tool) +
+                                    r"(?![a-z_])", raw, re.IGNORECASE))
+    return {
+        "signature": signature,
+        "headless_required_permission_kind": required_kind,
+        "matched_categories": categories,
+        "known_tools_mentioned": mentioned,
+        "stderr_has_auth_or_quota_hint": bool(re.search(
+            r"RESOURCE_EXHAUSTED|quota|429|UNAUTHENTICATED|"
+            r"token expired|login required", raw, re.IGNORECASE)),
+        "stderr_character_count": len(raw),
+    }
+
+
 TOOL_STATES = frozenset({"ACTIVE", "DONE", "FAILED", "ERROR", "CANCELED"})
 TERMINAL_STATES = frozenset({"SUCCESS", "ERROR", "CANCELED", "INTERRUPTED",
                               "INVALID", "WAITING", "RUNNING"})
@@ -47,9 +106,11 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
         if stderr_path.is_symlink() or stderr_path.stat().st_size > MAX_LOG_BYTES:
             raise ValueError("Refusing symlink or oversized stderr")
         raw_stderr = stderr_path.read_text(encoding="utf-8-sig", errors="replace")
-    denied_stderr = bool(DENIAL.search(raw_stderr))
+    stderr_summary = classify_stderr(raw_stderr)
+    denied_stderr = stderr_summary["signature"] != "NO_DENIAL_PATTERN"
     if not trace.exists():
         return {"trace_present": False, "stderr_permission_denial_hint": denied_stderr,
+                "stderr_permission_fingerprint": stderr_summary,
                 "diagnosis": "TRACE_MISSING"}
     event_counts = {event: 0 for event in sorted(KNOWN_EVENTS)}
     unknown_event_count = 0
@@ -59,6 +120,9 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
     final_model_delta_chunks: list[str] = []
     model_response_steps = set()
     tool_steps: list[dict[str, Any]] = []
+    agent_response_key_counts = {
+        key: 0 for key in sorted(KNOWN_RESPONSE_PAYLOAD_KEYS)
+    }
     with trace.open("r", encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             if not line.strip():
@@ -91,6 +155,9 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
             if not isinstance(step, dict):
                 continue
             if step.get("step_type") == "agent_response":
+                for known in agent_response_key_counts:
+                    if known in step:
+                        agent_response_key_counts[known] += 1
                 delta = step.get("text_delta")
                 # Only count original fragments. Never expose transcript text.
                 if isinstance(delta, str):
@@ -152,6 +219,10 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
         "terminal_response_character_counts": terminal_response_sizes,
         "agent_response_step_count": len(model_response_steps),
         "agent_response_text_delta_count": len(final_model_delta_chunks),
+        "agent_response_known_payload_key_counts": {
+            key: count for key, count in agent_response_key_counts.items()
+            if count > 0
+        },
         "agent_response_text_character_count": sum(map(len, final_model_delta_chunks)),
         "target_mp3_read_step_updates": len(mp3_calls),
         "target_tool_state_counts": {
@@ -165,6 +236,7 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
             x["tool_output_chars"] for x in mp3_calls),
         "target_tool_denial_or_error_hint": denied_tool,
         "stderr_permission_denial_hint": denied_stderr,
+        "stderr_permission_fingerprint": stderr_summary,
         "diagnosis": diagnosis,
         "audio_bytes_reached_model_verified": False,
     }

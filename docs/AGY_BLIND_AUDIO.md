@@ -98,7 +98,7 @@ CLI exit-zero / terminal SUCCESS events, no `answer.json`, and no
 nonempty terminal response. This means **INCOMPLETE**, not proven transcription
 failure or success.
 
-AGN/AGY Headless may soft-deny unapproved tool operations and still exit zero.
+AGY Headless may soft-deny unapproved tool operations and still exit zero.
 A terminal SUCCESS with an empty response has also been reported in AGY.
 Do not assume an observed tool *request* was actually allowed or completed.
 
@@ -120,6 +120,35 @@ model text fragments may have been streamed but terminal response was
 empty; analyze that category separately before considering any replay.
 `SUCCESS_OR_OTHER_TERMINAL_WITH_NO_MODEL_TEXT` means no usable
 answer was found, not that the MP3 contained no speech.
+
+#### Distinguish *which* permission was denied
+
+The local `agy_blind_diagnose.py` output includes
+`stderr_permission_fingerprint`, which reports **only allowlisted
+labels**, never original stderr text or paths:
+
+- `signature=HEADLESS_AUTO_DENIAL`: Headless refusal wording detected.
+  Check `headless_required_permission_kind` to distinguish an explicit
+  `read_file`, `write_file` or `command` permission.
+- `signature=EXPLICIT_USER_DENY_RULE`: An explicit user-configured
+  deny rule appears to be involved. Do not bypass it.
+- `signature=SANDBOX_OR_APPCONTAINER_RESTRICTION`: OS isolation or
+  sandbox text is associated with the denial.
+- `signature=FILESYSTEM_ACCESS_DENIED`: A local access error is
+  suggested, but may not be an AGY policy issue.
+- `signature=GENERIC_PERMISSION_DENIAL`: Generic denial with insufficient
+  detail; further review is necessary.
+
+A tool name in `known_tools_mentioned` is **only a mention** in stderr
+and may occur in explanatory examples. The separate
+`headless_required_permission_kind` is populated only when a
+known permission name occurs in the more specific documented
+`tool required the "..." permission` form.
+
+The Antigravity CLI release notes document headless soft-denials for tools
+which need confirmation. The CLI's terminal `SUCCESS` and process
+exit code 0 therefore cannot be used as a permission grant or proof of model
+audio perception.
 
 Do **not** rerun completed cases, modify existing AGY permission settings
 or enable `--dangerously-skip-permissions` based solely on empty
