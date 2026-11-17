@@ -17,7 +17,11 @@ from pathlib import Path
 import re
 import subprocess  # Reserved for test-enforced guarantee: no process is run.
 
-from tools.agy_blind_audio import inspect_headless_trace
+# Both entrypoints are supported: "python tools/..." and "python -m tools...".
+if __package__:
+    from .agy_blind_audio import inspect_headless_trace
+else:
+    from agy_blind_audio import inspect_headless_trace
 
 SESSION_RE = re.compile(r"blind-[0-9a-f]{16}\Z")
 CASE_RE = re.compile(r"case-[0-9a-f]{12}\Z")
