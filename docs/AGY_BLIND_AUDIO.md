@@ -1,4 +1,7 @@
-# AGY Flash blind Korean speech vs silence A/B experiment
+# AGY Flash blind three-condition audio experiment
+
+The current v3 benchmark uses **Korean speech, audible beep-only audio,
+and exact silence** as three independently blinded classes.
 
 The repository contains **source and synthetic tests only**. Never commit a real
 MP3, private answer key, model response, raw AGY event stream or transcript.
@@ -11,11 +14,13 @@ That does not independently establish that actual audio bytes reached Gemini.
 A blinded trial helps distinguish real audio comprehension from guessing or
 text leakage, without exposing the text of the voice recording in a model prompt.
 
-The harness creates **three randomized Korean speech samples** and **two exact
-30-second silent MP3 samples** by default. Case directory names and prompts do
-not reveal the class or the spoken text. Each spoken sample contains a random
-six-digit Korean sound sequence, never present in the model's workspace except
-as **sound**.
+The harness creates **three randomized Korean speech samples, one audible
+beep-only MP3 and one exact silent MP3** by default. All files are 30-second
+mono MP3s with opaque case names. Spoken samples include randomized six-digit
+Korean sound sequences. A beep-only MP3 contains **2–5 distinct 920 Hz tones**;
+the randomly selected beep count stays in the separate private answer key.
+Neither spoken phrases nor the beep count appears in the agent's prompt or
+workspace except as actual audio.
 
 ### Prerequisites
 
@@ -55,8 +60,8 @@ python .\tools\agy_blind_audio.py run --session $session --trial all
 
 The second command is a **no-model-call** preview, listing case identifiers.
 
-Default roots (Windows): `%LOCALAPPDATA%AGYBlindAudiountime` and
-`%LOCALAPPDATA%AGYBlindAudio	ruth`. They are separate and
+Default roots (Windows): `%LOCALAPPDATA%\AGYBlindAudiountime` and
+`%LOCALAPPDATA%\AGYBlindAudio	ruth`. They are separate and
 outside the public Git checkout. The private manifest includes the actual
 spoken text, nonce and case-to-condition mapping; **never expose it to AGY,
 upload it, or use its phrase in any model prompt**. Media generation temporarily
@@ -80,7 +85,8 @@ Each trial starts a new AGY CLI process, with:
   as its final answer. It is explicitly forbidden to write any files.
 - The local Python host saves a validated final JSON response **only to
   the private truth folder**, never into the AGY workspace.
-- Explicit separate `NO_SPEECH` and `NO_AUDIO_ACCESS` verdicts
+- Explicit `AUDIO_TRANSCRIBED`, `NO_SPEECH` and `NO_AUDIO_ACCESS`
+  verdicts **plus** `acoustic_class` and `beep_count` for new v3 trials
 - Full raw AGY stream and stderr stored **only in the private folder**
 
 By default permission prompts are **not** bypassed. If the headless CLI
@@ -108,29 +114,62 @@ Any model-side file write invalidates a trial regardless of its transcript.
 
 **Retain the original session unchanged.** It cannot be rerun with a new
 prompt under the same trial ID because the benchmark deliberately
-prevents overwriting evidence. Start with one new speech and one new silence
+prevents overwriting evidence. Start with one new speech, one beep-only and one silence
 case to minimize cost:
 
 ```powershell
 git pull --ff-only origin main
-$session = (python .\tools\agy_blind_audio.py prepare --speech-count 1 --silence-count 1 | ConvertFrom-Json).session
+$session = (python .\tools\agy_blind_audio.py prepare --speech-count 1 --tone-count 1 --silence-count 1 | ConvertFrom-Json).session
 python .\tools\agy_blind_audio.py run --session $session --trial all
 ```
 
 The dry run above performs **zero model requests**. To explicitly initiate
-the two model requests (only after checking the workspaces and permissions):
+the three model requests (only after checking the workspaces and permissions):
 
 ```powershell
 python .\tools\agy_blind_audio.py run --session $session --trial all --submit
 python .\tools\agy_blind_audio.py evaluate --session $session --max-cer 0.25
 ```
 
-A 1+1 trial cannot yield the full 3+2 benchmark PASS; if both cases meet
-all behavioral checks its correct verdict is
+A 1+1+1 trial cannot yield the full 3+1+1 benchmark PASS; if all cases meet
+their behavioral checks its correct verdict is
 `PROVISIONAL_INSUFFICIENT_TRIALS`. If Headless still
 returns empty output, diagnose that **new** session offline with
 `agy_blind_diagnose.py`; do not bypass permissions or repeat
 the same trial.
+
+### Three-condition acoustic classification and blinded beep count
+
+New CLI defaults: `--speech-count 3 --tone-count 1 --silence-count 1`.
+To limit model quota for an initial check, use 1+1+1 as documented above.
+The v3 response contract has private manifest schema `agy_blind_audio_v2`,
+and model output contract `host_terminal_json_v3`. Old sessions
+continue to use their original parser and thresholds.
+
+The model must output exactly one JSON object. For example, a beep-only
+response can have this **illustrative structure** (the number shown is
+not part of any private trial):
+
+```json
+{
+  "verdict": "NO_SPEECH",
+  "audio_analyzed": true,
+  "acoustic_class": "TONE",
+  "beep_count": 3,
+  "segments": []
+}
+```
+
+The secret 2–5 beep count is generated cryptographically and the PCM WAV
+is synthesized locally in Python before FFmpeg encodes the same 30-second
+MP3 format. The intermediate WAV is deleted. The scorer rejects a wrong
+tone count, a beep file mislabeled SILENCE, any invented speech, or a
+NO_AUDIO_ACCESS answer. This isolates acoustic access from speech content.
+
+The agent may use only read_file on the target MP3; the host captures the
+structured final response to its private folder without a model-side write.
+Neither an apparent tool call nor a passing response independently verifies
+the internal binary media transport, so that separate caveat remains.
 
 ### Diagnose an empty Headless SUCCESS without spending more quota
 
@@ -248,10 +287,18 @@ A behavioral PASS requires:
    with **no other model tool calls**, including `write_file`. For
    the v2 output contract, the only accepted answer source is
    `private_terminal_recovery` from the host.
-3. For **every** speech trial, nonempty model transcription, six-digit Korean
-   nonce correctly heard and character error rate (CER) at most 0.25.
-4. For **every** silence trial, explicit `NO_SPEECH` with no segments
-   and no invented text.
+3. Every speech trial must restore the random six-digit nonce, report
+   acoustic_class=SPEECH and beep_count=0, with CER at most 0.25.
+4. Every beep-only trial must report verdict=NO_SPEECH,
+   acoustic_class=TONE and the **exact private beep count** with no segments.
+5. Every silence trial must report verdict=NO_SPEECH,
+   acoustic_class=SILENCE and beep_count=0 with no segments.
+6. All successful trials require audio_analyzed=true. A NO_AUDIO_ACCESS
+   verdict always fails the behavioral test, including for complete silence.
+
+The current v3 full benchmark requires at least **3 speech + 1 beep + 1
+silence** trials. Archived v1 manifests use their original **3 speech + 2
+silence** requirement.
 
 A failed/missing AGY call is INCOMPLETE, not success. Smaller experiments
 are PROVISIONAL. A behavioral pass establishes strong evidence of audio

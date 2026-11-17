@@ -250,7 +250,8 @@ def summarize(private_root: Path, session: str) -> dict:
     if manifest_file.is_symlink() or not manifest_file.is_file():
         raise FileNotFoundError("Private manifest unavailable")
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    if manifest.get("session") != session or manifest.get("schema") != "agy_blind_audio_v1":
+    if (manifest.get("session") != session or manifest.get("schema") not in
+            {"agy_blind_audio_v1", "agy_blind_audio_v2"}):
         raise ValueError("Unexpected private manifest")
     cases = manifest.get("cases", [])
     if not isinstance(cases, list) or not 1 <= len(cases) <= 20:
