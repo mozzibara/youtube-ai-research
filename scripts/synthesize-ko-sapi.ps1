@@ -12,7 +12,7 @@ try {
     if ($korean.Count -lt 1) { throw "KOREAN_SAPI_VOICE_NOT_INSTALLED" }
     $voice.SelectVoice($korean[0].VoiceInfo.Name)
     $voice.Rate = -1
-    $fmt = New-Object -TypeName "System.Speech.AudioFormat.SpeechAudioFormatInfo" -ArgumentList @(
+    $fmt = [System.Speech.AudioFormat.SpeechAudioFormatInfo]::new(
         16000,
         [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,
         [System.Speech.AudioFormat.AudioChannel]::Mono
