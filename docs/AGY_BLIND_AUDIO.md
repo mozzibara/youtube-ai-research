@@ -599,7 +599,8 @@ This produces only allowlisted categories and numeric counts:
 `target_tool_event_count`, `distinct_step_index_count`,
 `repeated_step_index_groups`, `distinct_call_id_count`,
 `missing_call_id_event_count`, `distinct_argument_envelope_count`,
-`repeat_update_possible`, `target_reference_location`,
+`repeat_update_possible`, `tool_step_statuses`,
+`same_step_status_change_observed`, `target_reference_location`,
 `post_target_event_types`, and `correlation_level`.
 Raw step IDs, tool call IDs, argument key names/values, reference paths,
 transcripts, decoded media bytes, or model output are never printed.
