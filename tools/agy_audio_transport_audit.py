@@ -299,11 +299,164 @@ def audit_session(private_root: Path, session: str) -> dict:
     }
 
 
+
+# Safe labels only. Never emit arbitrary input-parameter names: they may be paths,
+# tokens, prompt content, or sensitive names masquerading as JSON dictionary keys.
+VISIBLE_PARAMETER_KEYS = frozenset({
+    "file_path", "path", "filename", "file", "uri", "absolute_path",
+    "relative_path", "target_path", "filepath", "filePath",
+})
+VISIBLE_TOOL_RESULT_KEYS = ("result", "output", "response")
+
+
+def _parameter_envelope(params: object) -> tuple[str, object]:
+    """Classify serialization without printing values or dynamic keys."""
+    if isinstance(params, dict):
+        return "OBJECT", params
+    if isinstance(params, list):
+        return "ARRAY", params
+    if isinstance(params, str):
+        try:
+            parsed = json.loads(params)
+        except (ValueError, TypeError):
+            return "TEXT", params
+        if isinstance(parsed, dict):
+            return "JSON_OBJECT_TEXT", parsed
+        if isinstance(parsed, list):
+            return "JSON_ARRAY_TEXT", parsed
+        return "JSON_SCALAR_TEXT", parsed
+    if params is None:
+        return "NULL", params
+    return "SCALAR", params
+
+
+def _legacy_target_reference(params: object) -> bool:
+    """Match only the already-used blind-evaluator's unscoped hint.
+
+    This is an observation of serialized arguments, not a verified file path.
+    It must never authorize binary byte matching.
+    """
+    try:
+        return "clip_00_30.mp3" in json.dumps(
+            params, ensure_ascii=False).casefold()
+    except (TypeError, ValueError):
+        return False
+
+
+def _probe_trace_shape(path: Path) -> dict:
+    """Inspect known AGY stream metadata only, leaving raw records untouched."""
+    read_events = 0
+    legacy_matches = 0
+    strict_matches = 0
+    root_types: set[str] = set()
+    known_keys: set[str] = set()
+    result_keys: set[str] = set()
+    name_origins: set[str] = set()
+    unknown_keys = 0
+    invalid_lines = 0
+    with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                invalid_lines += 1
+                continue
+            if not isinstance(row, dict) or row.get("event") != "step_update":
+                continue
+            step = row.get("step_update")
+            if not isinstance(step, dict) or step.get("step_type") != "tool":
+                continue
+            info = step.get("tool_info")
+            if not isinstance(info, dict):
+                continue
+            name = info.get("name") or step.get("tool_name")
+            if not isinstance(name, str) or name.split(".")[-1] != "read_file":
+                continue
+            read_events += 1
+            if isinstance(info.get("name"), str) and info.get("name"):
+                name_origins.add("TOOL_INFO_NAME")
+            else:
+                name_origins.add("STEP_TOOL_NAME")
+            params = info.get("parameters")
+            kind, parsed = _parameter_envelope(params)
+            root_types.add(kind)
+            if isinstance(parsed, dict):
+                known_keys.update(k for k in parsed if k in VISIBLE_PARAMETER_KEYS)
+                unknown_keys += sum(k not in VISIBLE_PARAMETER_KEYS for k in parsed)
+            strict_matches += int(_target_argument(params))
+            legacy_matches += int(_legacy_target_reference(params))
+            result_keys.update(k for k in VISIBLE_TOOL_RESULT_KEYS if k in info)
+    scope = (
+        "STRICT_KNOWN_PATH_FIELD" if strict_matches
+        else "UNSCOPED_LEGACY_REFERENCE" if legacy_matches
+        else "NO_LEGACY_TARGET_EVENT"
+    )
+    return {
+        "trace_status": "INCOMPLETE_TRACE" if invalid_lines else "TRACE_PRESENT",
+        "read_file_tool_events": read_events,
+        "legacy_target_read_calls": legacy_matches,
+        "strict_target_read_calls": strict_matches,
+        "target_argument_shape": scope,
+        "parameter_envelope_types": sorted(root_types),
+        "parameter_known_keys": sorted(known_keys),
+        "unrecognized_top_level_keys": unknown_keys,
+        "tool_name_origins": sorted(name_origins),
+        "observed_tool_result_fields": sorted(result_keys),
+    }
+
+
+def probe_session(private_root: Path, session: str) -> dict:
+    """Redacted, read-only protocol discovery for previously archived trials.
+
+    Does not read MP3/audio bytes or score speech; does not call any model.
+    All output strings are fixed internal enums or allowlisted field labels.
+    """
+    priv, manifest = _read_manifest(private_root, session)
+    trials = []
+    for item in manifest["cases"]:
+        case_id = item["id"]
+        trace = priv / (case_id + ".ndjson")
+        report = {
+            "trial": case_id,
+            "trace_status": "TRACE_MISSING",
+            "read_file_tool_events": 0,
+            "legacy_target_read_calls": 0,
+            "strict_target_read_calls": 0,
+            "target_argument_shape": "NO_LEGACY_TARGET_EVENT",
+            "parameter_envelope_types": [],
+            "parameter_known_keys": [],
+            "unrecognized_top_level_keys": 0,
+            "tool_name_origins": [],
+            "observed_tool_result_fields": [],
+            "independent_binary_transport_verified": False,
+        }
+        if trace.is_symlink() or (trace.exists() and
+                                 not _regular_file(trace, MAX_TRACE_BYTES)):
+            report["trace_status"] = "UNSAFE_TRACE"
+        elif trace.exists():
+            report.update(_probe_trace_shape(trace))
+        trials.append(report)
+    return {
+        "schema": "agy_cli_audio_event_shape_v1",
+        "session": session,
+        "model_called": False,
+        "private_evidence_modified": False,
+        "independent_binary_transport_verified": False,
+        "trials": trials,
+        "note": ("Inspects existing tool-event structure only; names/values of "
+                 "unrecognized fields and any actual media content are hidden. "
+                 "No proof of provider-side audio ingress."),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline AGY MP3 tool-result byte audit (no model requests)")
     parser.add_argument("--session", required=True)
     parser.add_argument("--private-root", type=Path, default=None)
+    parser.add_argument(
+        "--inspect-shape", action="store_true",
+        help="Inspect archived AGY read_file event envelopes without any private values")
     args = parser.parse_args(argv)
     if args.private_root is None:
         local = os.environ.get("LOCALAPPDATA")
@@ -313,7 +466,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         private_root = args.private_root
     try:
-        report = audit_session(private_root, args.session)
+        report = (probe_session(private_root, args.session)
+                  if args.inspect_shape else audit_session(private_root, args.session))
     except (ValueError, OSError):
         print(json.dumps({"schema": "agy_cli_audio_byte_audit_v1",
                           "status": "AUDIT_UNAVAILABLE_OR_INVALID_EVIDENCE",
