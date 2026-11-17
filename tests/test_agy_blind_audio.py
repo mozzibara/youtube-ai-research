@@ -36,6 +36,9 @@ class BlindAudioTests(unittest.TestCase):
         self.assertIn("NO_SPEECH", mod.PROMPT)
         self.assertNotIn("확인 번호는", mod.PROMPT)
         self.assertNotIn("파란 우산이", mod.PROMPT)
+        self.assertNotIn("answer.json", mod.PROMPT)
+        self.assertIn("파일을 생성하거나 수정하지 마세요", mod.PROMPT)
+        self.assertIn("오직 최종 답변에", mod.PROMPT)
 
     def test_prepare_creates_only_media_inside_agent_workspace(self):
         with tempfile.TemporaryDirectory() as td:
@@ -241,6 +244,66 @@ class BlindAudioTests(unittest.TestCase):
             result = mod.recover(private.parent, SESSION)
             row = next(x for x in result["cases"] if x["trial"] == cid)
             self.assertEqual(row["recovery"], "NO_MP3_READ_FILE_CALL")
+
+    def test_write_file_tool_attempt_invalidates_behavioral_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._fixture(td)
+            cid = "case-000000000000"
+            trace = private / (cid + ".ndjson")
+            with trace.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"event": "step_update", "step_update": {
+                    "step_index": 7, "step_type": "tool", "state": "DONE",
+                    "tool_info": {"name": "write_file",
+                                  "parameters": {"Path": "answer.json"}}}}) + "\n")
+            result = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(result["trials"][0]["pass"])
+            self.assertTrue(result["trials"][0]["other_tool_calls_observed"])
+            self.assertEqual(result["overall"], "FAIL_AUDIO_DISCRIMINATION")
+
+    def test_new_host_only_contract_rejects_model_workspace_answer(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._fixture(td)
+            cid = "case-000000000000"
+            status_file = private / (cid + ".status.json")
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            status["output_contract"] = "host_terminal_json_v2"
+            status_file.write_text(json.dumps(status), encoding="utf-8")
+            result = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(result["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            first = result["trials"][0]
+            self.assertFalse(first["host_output_isolation"])
+            self.assertEqual(first["answer_source"], "workspace_answer")
+
+    def test_all_host_captured_terminal_json_trials_pass_offline(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._fixture(td)
+            for status_file in private.glob("*.status.json"):
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                status["output_contract"] = "host_terminal_json_v2"
+                status_file.write_text(json.dumps(status), encoding="utf-8")
+            for answer in runtime.rglob("answer.json"):
+                response = answer.read_text(encoding="utf-8")
+                answer.unlink()
+                cid = answer.parent.name
+                trace = private / (cid + ".ndjson")
+                rows = [json.loads(row) for row in trace.read_text(
+                    encoding="utf-8").splitlines()]
+                rows[-1]["result"]["response"] = response
+                trace.write_text(
+                    "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+                    + "\n", encoding="utf-8")
+            with patch.object(mod.subprocess, "run", side_effect=AssertionError(
+                    "Must never replay model requests")):
+                recovery = mod.recover(private.parent, SESSION)
+            self.assertEqual(
+                sum(row["recovery"] == "RECOVERED_FROM_TERMINAL_JSON"
+                    for row in recovery["cases"]), 5)
+            scored = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(scored["overall"], "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
+            self.assertTrue(all(row["host_output_isolation"]
+                                and row["answer_source"] == "private_terminal_recovery"
+                                for row in scored["trials"]))
+            self.assertFalse(scored["independent_binary_transport_verified"])
 
     def test_evaluation_rejects_modified_audio(self):
         with tempfile.TemporaryDirectory() as td:
