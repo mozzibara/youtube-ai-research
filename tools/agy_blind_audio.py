@@ -582,9 +582,9 @@ def diagnose_terminal_responses(private_root: Path, session: str) -> dict:
             contract = obj.get("output_contract")
         except (OSError, ValueError, TypeError):
             contract = None
-        safe_contract = contract if contract in {
-            "host_terminal_json_v2", ACOUSTIC_CONTRACT,
-            "legacy_workspace_answer"} else "UNKNOWN_CONTRACT"
+        safe_contract = (contract if isinstance(contract, str) and
+                         contract in {"host_terminal_json_v2", ACOUSTIC_CONTRACT,
+                                      "legacy_workspace_answer"} else "UNKNOWN_CONTRACT")
         trace = priv / (case_id + ".ndjson")
         if trace.is_symlink() or (trace.exists() and trace.stat().st_size >
                                  25 * 1024 * 1024):
