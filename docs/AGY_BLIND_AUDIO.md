@@ -91,6 +91,42 @@ is a no-op. The harness cannot prove permission confinement.
 
 Never run the same trial twice: existing outputs and logs are not overwritten.
 
+### Diagnose an empty Headless SUCCESS without spending more quota
+
+A real five-trial session produced five `read_file` attempts, five
+CLI exit-zero / terminal SUCCESS events, no `answer.json`, and no
+nonempty terminal response. This means **INCOMPLETE**, not proven transcription
+failure or success.
+
+AGN/AGY Headless may soft-deny unapproved tool operations and still exit zero.
+A terminal SUCCESS with an empty response has also been reported in AGY.
+Do not assume an observed tool *request* was actually allowed or completed.
+
+Inspect only metadata from the existing archived private NDJSON and stderr:
+
+```powershell
+$session = "blind-84c9e816a9a54495"
+python .\tools\agy_blind_diagnose.py --session $session
+```
+
+The diagnostic does not invoke AGY or reproduce any text from transcripts,
+tool output, stderr or hidden answer keys. Per case it reports terminal
+status, final-response length, presence and length of model `agent_response`
+deltas, target MP3 read attempts, tool result state markers and **hints**
+of explicit permission denial. `POSSIBLE_TOOL_PERMISSION_DENIAL_OR_ERROR`
+means denial language was observed, not a reconstructed proof of why it
+failed. `EMPTY_TERMINAL_RESPONSE_AGENT_TEXT_PRESENT` means that
+model text fragments may have been streamed but terminal response was
+empty; analyze that category separately before considering any replay.
+`SUCCESS_OR_OTHER_TERMINAL_WITH_NO_MODEL_TEXT` means no usable
+answer was found, not that the MP3 contained no speech.
+
+Do **not** rerun completed cases, modify existing AGY permission settings
+or enable `--dangerously-skip-permissions` based solely on empty
+terminal responses. A narrowly scoped policy change should only be
+considered after the private diagnostic explicitly identifies a denied
+operation and the actual CLI workspace/sandbox boundary has been checked.
+
 ### Recover existing final model responses when answer.json was not written
 
 On Windows AGY Headless, a model request may complete successfully and
