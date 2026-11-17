@@ -182,7 +182,8 @@ def _scan_trace(trace: Path, size: int, digest: str) -> dict:
             step = row.get("step_update")
             if (isinstance(step, dict) and step.get("step_type") == "tool_result"
                     and step.get("source") == "TOOL"
-                    and step.get("tool_call_id") in ids):
+                    and isinstance(step.get("tool_call_id"), str)
+                    and step["tool_call_id"] in ids):
                 results.append(step.get("result"))
 
     candidate_count = 0
