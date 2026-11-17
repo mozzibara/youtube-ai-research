@@ -98,6 +98,7 @@ class DiagnosisTests(unittest.TestCase):
         fp = result["stderr_permission_fingerprint"]
         self.assertEqual(fp["signature"], "HEADLESS_AUTO_DENIAL")
         self.assertIn("read_file", fp["known_tools_mentioned"])
+        self.assertEqual(fp["headless_required_permission_kind"], "read_file")
         self.assertEqual(result["diagnosis"], "POSSIBLE_TOOL_PERMISSION_DENIAL_OR_ERROR")
         as_json = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("C:/private", as_json)
@@ -120,6 +121,23 @@ class DiagnosisTests(unittest.TestCase):
         none = mod.classify_stderr("Everything is normal.")
         self.assertEqual(none["signature"], "NO_DENIAL_PATTERN")
         self.assertEqual(none["known_tools_mentioned"], [])
+
+    def test_required_permission_type_is_allowlisted_not_raw(self):
+        known = mod.classify_stderr(
+            'a tool required the "write_file" permission that headless mode '
+            'cannot prompt for, so it was auto-denied'
+        )
+        self.assertEqual(known["headless_required_permission_kind"], "write_file")
+        unknown = mod.classify_stderr(
+            'a tool required the "private_secret_function" permission that '
+            'headless mode cannot prompt for, so it was auto-denied'
+        )
+        self.assertEqual(unknown["headless_required_permission_kind"],
+                         "UNKNOWN_OR_NOT_STATED")
+        self.assertNotIn("private_secret_function", json.dumps(unknown))
+        self.assertEqual(mod.classify_stderr(
+            "Permission denied for read_file")["headless_required_permission_kind"],
+            "UNKNOWN_OR_NOT_STATED")
 
     def test_unknown_log_values_and_model_payloads_are_never_printed(self):
         rows = self._rows()
