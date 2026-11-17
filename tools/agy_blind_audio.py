@@ -454,6 +454,162 @@ def _parse_terminal_json_response(
     return canonical
 
 
+def _categorize_response_validation(raw_response: str,
+                                    contract: str) -> dict:
+    """Diagnose final JSON shape without returning content or secret values.
+
+    Categories are evidence about the response contract, not whether audio
+    reached the model. Never echo text, unknown keys, dynamic enum strings,
+    model utterances, audio labels from the private answer key, or JSON errors.
+    """
+    result = {
+        "validation_category": "UNKNOWN",
+        "response_character_count": (
+            len(raw_response) if isinstance(raw_response, str) else 0),
+        "reported_verdict": "UNKNOWN_OR_MISSING",
+        "reported_acoustic_class": "UNKNOWN_OR_MISSING",
+        "reported_audio_analyzed": None,
+        "reported_beep_count_type": "MISSING",
+        "reported_segments_count": None,
+        "response_envelope": "UNKNOWN",
+        "independent_audio_receipt_verified": False,
+    }
+    if not isinstance(raw_response, str) or not raw_response.strip():
+        result["validation_category"] = "EMPTY_TERMINAL_RESPONSE"
+        return result
+    if len(raw_response) > 100000:
+        result["validation_category"] = "OVERSIZED_TERMINAL_RESPONSE"
+        return result
+    content = raw_response.strip()
+    fence = re.fullmatch(r"\x60{3}(?:json)?\s*\n([\s\S]*?)\n\x60{3}",
+                         content, flags=re.IGNORECASE)
+    if fence:
+        result["response_envelope"] = "STANDALONE_JSON_FENCE"
+        content = fence.group(1).strip()
+    elif content.startswith("\x60\x60\x60"):
+        result["response_envelope"] = "UNEXPECTED_MARKDOWN_ENVELOPE"
+        result["validation_category"] = "NON_STANDALONE_JSON_TEXT"
+        return result
+    else:
+        result["response_envelope"] = "PLAIN_TEXT"
+    try:
+        obj = json.loads(content)
+    except (ValueError, TypeError):
+        result["validation_category"] = "INVALID_JSON_SYNTAX_OR_ADDITIONAL_TEXT"
+        return result
+    if not isinstance(obj, dict):
+        result["validation_category"] = "JSON_TOP_LEVEL_NOT_OBJECT"
+        return result
+    verdict = obj.get("verdict")
+    if isinstance(verdict, str) and verdict in {
+            "AUDIO_TRANSCRIBED", "NO_SPEECH", "NO_AUDIO_ACCESS"}:
+        result["reported_verdict"] = verdict
+    else:
+        result["validation_category"] = "VERDICT_MISSING_OR_INVALID"
+        return result
+    analyzed = obj.get("audio_analyzed")
+    if type(analyzed) is not bool:
+        result["validation_category"] = "AUDIO_ANALYZED_NOT_BOOLEAN"
+        return result
+    result["reported_audio_analyzed"] = analyzed
+    segs = obj.get("segments")
+    if not isinstance(segs, list) or len(segs) > 100:
+        result["validation_category"] = "SEGMENTS_NOT_VALID_LIST"
+        return result
+    result["reported_segments_count"] = len(segs)
+    if any(not isinstance(seg, dict)
+           or not isinstance(seg.get("text"), str)
+           or len(seg["text"]) > 2000
+           or type(seg.get("start")) not in {float, int}
+           or type(seg.get("end")) not in {float, int}
+           or not 0 <= seg["start"] < seg["end"] <= 30.5
+           for seg in segs):
+        result["validation_category"] = "SEGMENT_ELEMENT_SCHEMA_INVALID"
+        return result
+    if verdict == "AUDIO_TRANSCRIBED":
+        if not analyzed or not segs or not any(x["text"].strip() for x in segs):
+            result["validation_category"] = "VERDICT_SEGMENTS_OR_ANALYSIS_CONFLICT"
+            return result
+    elif (verdict == "NO_SPEECH" and (not analyzed or segs)
+          or verdict == "NO_AUDIO_ACCESS" and (analyzed or segs)):
+        result["validation_category"] = "VERDICT_SEGMENTS_OR_ANALYSIS_CONFLICT"
+        return result
+    if contract == ACOUSTIC_CONTRACT:
+        acoustic = obj.get("acoustic_class")
+        if isinstance(acoustic, str) and acoustic in ACOUSTIC_CLASSES:
+            result["reported_acoustic_class"] = acoustic
+        else:
+            result["validation_category"] = "ACOUSTIC_CLASS_MISSING_OR_INVALID"
+            return result
+        beep = obj.get("beep_count", ...)
+        result["reported_beep_count_type"] = (
+            "MISSING" if beep is ... else "NULL" if beep is None
+            else "BOOLEAN" if type(beep) is bool
+            else "INTEGER" if type(beep) is int else "OTHER")
+        matched = (
+            verdict == "AUDIO_TRANSCRIBED" and acoustic == "SPEECH"
+            and type(beep) is int and beep == 0
+            or verdict == "NO_SPEECH" and (
+                acoustic == "TONE" and type(beep) is int and beep in TONE_COUNTS
+                or acoustic == "SILENCE" and type(beep) is int and beep == 0)
+            or verdict == "NO_AUDIO_ACCESS" and
+            acoustic == "UNAVAILABLE" and beep is None
+        )
+        if not matched:
+            result["validation_category"] = "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT"
+            return result
+    if _parse_terminal_json_response(raw_response, contract=contract) is None:
+        result["validation_category"] = "PARSER_REJECTED_OTHER"
+    else:
+        result["validation_category"] = "VALID_TERMINAL_JSON"
+    return result
+
+
+def diagnose_terminal_responses(private_root: Path, session: str) -> dict:
+    """Inspect archived headless responses only; never contact AGY or write files."""
+    priv, manifest = _load_session(private_root, session)
+    reports = []
+    for item in manifest["cases"]:
+        case_id = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(case_id, str) or not re.fullmatch(
+                r"case-[0-9a-f]{12}", case_id):
+            raise ValueError("Invalid trial identifier in private manifest")
+        status_path = priv / (case_id + ".status.json")
+        try:
+            if status_path.is_symlink():
+                raise ValueError("Symlink status is not allowed")
+            obj = json.loads(status_path.read_text(encoding="utf-8"))
+            contract = obj.get("output_contract")
+        except (OSError, ValueError, TypeError):
+            contract = None
+        safe_contract = contract if contract in {
+            "host_terminal_json_v2", ACOUSTIC_CONTRACT,
+            "legacy_workspace_answer"} else "UNKNOWN_CONTRACT"
+        trace = priv / (case_id + ".ndjson")
+        if trace.is_symlink() or (trace.exists() and trace.stat().st_size >
+                                 25 * 1024 * 1024):
+            reports.append({"trial": case_id,
+                            "validation_category": "UNSAFE_OR_OVERSIZED_TRACE"})
+            continue
+        state, response = _terminal_response_from_stream(trace)
+        if response is None:
+            reports.append({"trial": case_id,
+                            "output_contract": safe_contract,
+                            "validation_category": state
+                            if state in {
+                                "TRACE_MISSING", "NO_UNIQUE_TERMINAL_RESULT",
+                                "TERMINAL_NOT_SUCCESS", "EMPTY_TERMINAL_RESPONSE"}
+                            else "UNKNOWN_TERMINAL_STATE"})
+            continue
+        report = _categorize_response_validation(response, safe_contract)
+        reports.append({"trial": case_id, "output_contract": safe_contract,
+                        **report})
+    return {"schema": "agy_blind_terminal_validation_diagnostic_v1",
+            "session": session, "model_called": False,
+            "all_responses_private": True, "trials": reports,
+            "note": "Classifies terminal response schema only; never scores secret audio content."}
+
+
 def _terminal_response_from_stream(path: Path) -> tuple[str, str | None]:
     """Return final successful model response, not a tool message or stream delta."""
     if not path.exists():
@@ -698,6 +854,11 @@ def main(argv: list[str] | None = None) -> int:
         "recover", help="Recover strict final JSON from previously saved private headless streams")
     recover_parser.add_argument("--private-root", type=Path, default=None)
     recover_parser.add_argument("--session", required=True)
+    diagnose_parser = sub.add_parser(
+        "diagnose-response",
+        help="Classify archived terminal JSON validation errors with no model calls")
+    diagnose_parser.add_argument("--private-root", type=Path, default=None)
+    diagnose_parser.add_argument("--session", required=True)
     e = sub.add_parser("evaluate", help="Compute private CER, nonce and silence checks")
     e.add_argument("--private-root", type=Path, default=None)
     e.add_argument("--session", required=True)
@@ -726,6 +887,8 @@ def main(argv: list[str] | None = None) -> int:
                                args.submit, args.auto_approve, args.timeout)
     elif args.action == "recover":
         result = recover(private_root, args.session)
+    elif args.action == "diagnose-response":
+        result = diagnose_terminal_responses(private_root, args.session)
     else:
         result = evaluate(private_root, args.session, args.max_cer)
     print(json.dumps(result, ensure_ascii=False, indent=2))
