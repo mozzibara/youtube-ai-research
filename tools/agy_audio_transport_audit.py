@@ -694,6 +694,196 @@ def inspect_lifecycle_session(private_root: Path, session: str) -> dict:
     }
 
 
+
+RETURN_EVENT_KINDS = frozenset({
+    "step_update", "tool_result", "result",
+})
+RETURN_STEP_SUBTYPES = frozenset({
+    "tool", "tool_result", "generic", "message", "agent_response",
+    "progress", "text", "thinking", "user", "model", "system",
+})
+RETURN_SOURCES = frozenset({"MODEL", "SYSTEM", "USER", "TOOL"})
+RETURN_FIELD_LABELS = frozenset({
+    "content", "tool_result", "tool_results", "tool_responses",
+    "tool_outputs", "result", "output", "response", "parts",
+    "tool_call_id", "source", "step_type", "status", "step_index",
+})
+
+
+def _safe_value_type(value: object, present: bool = True) -> str:
+    if not present:
+        return "MISSING"
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, str):
+        return "STRING"
+    if isinstance(value, (int, float)):
+        return "NUMBER"
+    if isinstance(value, dict):
+        return "OBJECT"
+    if isinstance(value, list):
+        return "ARRAY"
+    return "OTHER"
+
+
+def _known_status(value: object) -> str | None:
+    return (value if isinstance(value, str)
+            and value in LIFECYCLE_STATUSES else None)
+
+
+def _return_envelope_shape(row: dict) -> dict:
+    event = row.get("event")
+    if event == "step_update":
+        kind = "STEP_UPDATE"
+    elif event == "tool_result":
+        kind = "TOOL_RESULT"
+    elif event == "result":
+        kind = "TERMINAL_RESULT"
+    else:
+        kind = "OTHER"
+    step = row.get("step_update")
+    step = step if isinstance(step, dict) and kind == "STEP_UPDATE" else {}
+    subtype = step.get("step_type")
+    subtype = (subtype.upper() if isinstance(subtype, str)
+               and subtype in RETURN_STEP_SUBTYPES else
+               "MISSING" if not step else "OTHER")
+    source = row.get("source")
+    if source is None:
+        source = step.get("source")
+    source_label = source if isinstance(source, str) and source in RETURN_SOURCES else "OTHER"
+    selected = step if kind == "STEP_UPDATE" else row
+    present = "content" in selected
+    content_type = _safe_value_type(selected.get("content"), present)
+    # Only fixed, public schema vocabulary is displayed; unknown keys and
+    # *all* record values (including model responses) stay private.
+    known = sorted(key for key in selected if key in RETURN_FIELD_LABELS)
+    return {
+        "event_kind": kind,
+        "step_subtype": subtype,
+        "source_label": source_label,
+        "content_type": content_type,
+        "known_field_names": known,
+        "typed_result_candidate": (
+            kind == "TOOL_RESULT" and source_label == "TOOL" or
+            kind == "STEP_UPDATE" and subtype == "TOOL_RESULT"
+            and source_label == "TOOL"),
+        "verified_byte_receipt": False,
+    }
+
+
+def _inspect_return_trace(path: Path) -> dict:
+    """One-pass bounded read of archived stream; no audio/model transcripts output."""
+    rows = []
+    malformed = 0
+    with path.open("r", encoding="utf-8-sig", errors="replace") as stream:
+        for line in stream:
+            try:
+                item = json.loads(line)
+            except ValueError:
+                malformed += 1
+                continue
+            if isinstance(item, dict):
+                rows.append(item)
+    target_positions = []
+    group_keys = set()
+    statuses = {"step.status": set(), "tool_info.status": set()}
+    known_statuses = set()
+    for index, row in enumerate(rows):
+        if row.get("event") != "step_update":
+            continue
+        step = row.get("step_update")
+        if not isinstance(step, dict) or step.get("step_type") != "tool":
+            continue
+        info = step.get("tool_info")
+        if not isinstance(info, dict):
+            continue
+        name = info.get("name") or step.get("tool_name")
+        if not isinstance(name, str) or name.split(".")[-1] != "read_file":
+            continue
+        if not _legacy_target_reference(info.get("parameters")):
+            continue
+        target_positions.append(index)
+        # A repeated index identifies repeated *events*, not read executions.
+        step_id = step.get("step_index")
+        group_keys.add(("step", step_id) if type(step_id) is int
+                       else ("record", index))
+        for label, container in (("step.status", step),
+                                 ("tool_info.status", info)):
+            statuses[label].add(_safe_value_type(
+                container.get("status"), "status" in container))
+            known = _known_status(container.get("status"))
+            if known:
+                known_statuses.add(known)
+    following = []
+    if target_positions:
+        last = target_positions[-1]
+        following = [_return_envelope_shape(row) for row in rows[last + 1:last + 5]]
+    typed = any(row["typed_result_candidate"] for row in following)
+    return {
+        "trace_status": "INCOMPLETE_TRACE" if malformed else "TRACE_PRESENT",
+        "target_step_group_count": len(group_keys),
+        "target_event_count": len(target_positions),
+        "target_status_slots": {
+            label: sorted(values) for label, values in statuses.items()
+        },
+        "target_known_status_labels": sorted(known_statuses),
+        "adjacent_envelopes": following,
+        "typed_result_candidate_observed": typed,
+        "return_assessment": (
+            "INCOMPLETE_TRACE" if malformed else
+            "NO_TARGET_EVENT" if not target_positions else
+            "UNLINKED_TYPED_RESULT_CANDIDATE" if typed else
+            "ADJACENT_UNTYPED_EVENTS_ONLY" if following else
+            "NO_POST_TARGET_EVENT"),
+        "model_ingress_verified": False,
+        "independent_binary_transport_verified": False,
+    }
+
+
+def inspect_return_envelope_session(private_root: Path, session: str) -> dict:
+    """Inspect typed return slots next to the last target tool step, offline.
+
+    Does not equate an adjacent event with a tool result or prove any binary
+    delivery to a model. No media bytes, tool outputs, or secrets are printed.
+    """
+    priv, manifest = _read_manifest(private_root, session)
+    trials = []
+    for item in manifest["cases"]:
+        trace = priv / (item["id"] + ".ndjson")
+        result = {
+            "trial": item["id"],
+            "trace_status": "TRACE_MISSING",
+            "target_step_group_count": 0,
+            "target_event_count": 0,
+            "target_status_slots": {"step.status": [], "tool_info.status": []},
+            "target_known_status_labels": [],
+            "adjacent_envelopes": [],
+            "typed_result_candidate_observed": False,
+            "return_assessment": "TRACE_MISSING",
+            "model_ingress_verified": False,
+            "independent_binary_transport_verified": False,
+        }
+        if trace.is_symlink() or (trace.exists() and not _regular_file(
+                trace, MAX_TRACE_BYTES)):
+            result["trace_status"] = "UNSAFE_TRACE"
+            result["return_assessment"] = "UNSAFE_TRACE"
+        elif trace.exists():
+            result.update(_inspect_return_trace(trace))
+        trials.append(result)
+    return {
+        "schema": "agy_cli_audio_return_envelope_v1",
+        "session": session,
+        "model_called": False,
+        "private_evidence_modified": False,
+        "independent_binary_transport_verified": False,
+        "trials": trials,
+        "note": ("Tool-step adjacency and response-envelope structure are not "
+                 "proof of actual audio receipt or provider-model ingress."),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline AGY MP3 tool-result byte audit (no model requests)")
@@ -706,6 +896,9 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument(
         "--inspect-lifecycle", action="store_true",
         help="Summarize call-step repetitions and typed follow-up events without model calls")
+    mode.add_argument(
+        "--inspect-return-envelope", action="store_true",
+        help="Inspect known typed return slots after the target tool step, offline")
     args = parser.parse_args(argv)
     if args.private_root is None:
         local = os.environ.get("LOCALAPPDATA")
@@ -715,7 +908,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         private_root = args.private_root
     try:
-        report = (inspect_lifecycle_session(private_root, args.session)
+        report = (inspect_return_envelope_session(private_root, args.session)
+                  if args.inspect_return_envelope else
+                  inspect_lifecycle_session(private_root, args.session)
                   if args.inspect_lifecycle else
                   probe_session(private_root, args.session)
                   if args.inspect_shape else
