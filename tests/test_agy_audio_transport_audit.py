@@ -149,6 +149,14 @@ class AudioByteReceiptAuditTests(unittest.TestCase):
                         base64.b64encode(MP3).decode(), str(self.private)):
             self.assertNotIn(private, dumped)
 
+    def test_malformed_tool_name_is_ignored_without_crash(self):
+        row = self._call()
+        row["step_update"]["tool_info"]["name"] = {"injected": "PRIVATE_VALUE"}
+        self._trace(row)
+        out = self._trial()
+        self.assertEqual(out["assessment"], "NO_TARGET_READ_CALL")
+        self.assertNotIn("PRIVATE_VALUE", json.dumps(out))
+
     def test_invalid_session_refused(self):
         with self.assertRaises(ValueError):
             audit.audit_session(self.private_root, "../unsafe")
