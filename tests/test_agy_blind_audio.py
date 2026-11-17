@@ -164,6 +164,84 @@ class BlindAudioTests(unittest.TestCase):
                 result = mod.run_trial(private.parent, SESSION, "case-000000000000", False)
             self.assertFalse(result["submitted"])
 
+    def test_terminal_json_parser_only_accepts_explicit_valid_result(self):
+        valid = {"verdict": "NO_SPEECH", "audio_analyzed": True, "segments": []}
+        self.assertEqual(mod._parse_terminal_json_response(json.dumps(valid)), valid)
+        self.assertEqual(mod._parse_terminal_json_response(
+            "\x60\x60\x60json\n" + json.dumps(valid) + "\n\x60\x60\x60"), valid)
+        self.assertIsNone(mod._parse_terminal_json_response(
+            "This transcript is unavailable: " + json.dumps(valid)))
+        self.assertIsNone(mod._parse_terminal_json_response(json.dumps({
+            "verdict": "NO_SPEECH", "audio_analyzed": False, "segments": []})))
+        self.assertIsNone(mod._parse_terminal_json_response(json.dumps({
+            "verdict": "NO_SPEECH", "audio_analyzed": True,
+            "segments": [{"start": 0, "end": 3, "text": "invented"}]})))
+        self.assertIsNone(mod._parse_terminal_json_response(json.dumps({
+            "verdict": "AUDIO_TRANSCRIBED", "audio_analyzed": True,
+            "segments": [{"start": 0, "end": 4, "text": ""}]})))
+
+    def test_recover_five_archived_private_final_responses_without_model(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._fixture(td)
+            manifest = json.loads((private / "manifest.json").read_text(encoding="utf-8"))
+            for item in manifest["cases"]:
+                case_id = item["id"]
+                answer = runtime / case_id / "answer.json"
+                response = answer.read_text(encoding="utf-8")
+                answer.unlink()
+                trace = private / (case_id + ".ndjson")
+                rows = trace.read_text(encoding="utf-8").splitlines()
+                event = json.loads(rows[-1])
+                event["result"]["response"] = response
+                rows[-1] = json.dumps(event, ensure_ascii=False)
+                trace.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            with patch.object(mod.subprocess, "run", side_effect=AssertionError("Model must not run")):
+                result = mod.recover(private.parent, SESSION)
+            self.assertTrue(all(x["recovery"] == "RECOVERED_FROM_TERMINAL_JSON"
+                                for x in result["cases"]))
+            self.assertFalse(any(runtime.rglob("answer.json")))
+            self.assertEqual(len(list((private / "recoveries").glob("*.response.json"))), 5)
+            evaluated = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(evaluated["overall"], "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
+            self.assertTrue(all(x["answer_source"] == "private_terminal_recovery"
+                                for x in evaluated["trials"]))
+            self.assertNotIn("작은 풍선이", json.dumps(result, ensure_ascii=False))
+            again = mod.recover(private.parent, SESSION)
+            self.assertTrue(all(x["recovery"] == "ALREADY_RECOVERED"
+                                for x in again["cases"]))
+
+    def test_recover_fails_closed_if_final_response_is_not_strict_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._fixture(td)
+            cid = "case-000000000000"
+            (runtime / cid / "answer.json").unlink()
+            trace = private / (cid + ".ndjson")
+            rows = trace.read_text(encoding="utf-8").splitlines()
+            last = json.loads(rows[-1])
+            last["result"]["response"] = (
+                'Some commentary {"verdict":"NO_SPEECH",'
+                '"audio_analyzed":true,"segments":[]}')
+            rows[-1] = json.dumps(last)
+            trace.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            result = mod.recover(private.parent, SESSION)
+            row = next(x for x in result["cases"] if x["trial"] == cid)
+            self.assertEqual(row["recovery"], "UNPARSEABLE_TERMINAL_JSON")
+            self.assertNotIn("commentary", json.dumps(result))
+            self.assertFalse((private / "recoveries" / (cid + ".response.json")).exists())
+
+    def test_recover_requires_target_tool_and_success_event(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._fixture(td)
+            cid = "case-000000000000"
+            (runtime / cid / "answer.json").unlink()
+            trace = private / (cid + ".ndjson")
+            trace.write_text(json.dumps({"event": "result", "result": {
+                "status": "SUCCESS", "response": '{"verdict":"NO_SPEECH",'
+                '"audio_analyzed":true,"segments":[]}'}}) + "\n", encoding="utf-8")
+            result = mod.recover(private.parent, SESSION)
+            row = next(x for x in result["cases"] if x["trial"] == cid)
+            self.assertEqual(row["recovery"], "NO_MP3_READ_FILE_CALL")
+
     def test_evaluation_rejects_modified_audio(self):
         with tempfile.TemporaryDirectory() as td:
             runtime, private = self._fixture(td)

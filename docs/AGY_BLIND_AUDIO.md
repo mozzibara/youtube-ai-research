@@ -91,6 +91,38 @@ is a no-op. The harness cannot prove permission confinement.
 
 Never run the same trial twice: existing outputs and logs are not overwritten.
 
+### Recover existing final model responses when answer.json was not written
+
+On Windows AGY Headless, a model request may complete successfully and
+record a `read_file` invocation without creating `answer.json`.
+**Do not rerun completed trials.** The CLI's `--output-format stream-json`
+terminal `result.response` may contain the model's final JSON.
+
+For an existing session, use **offline recovery with no model calls**:
+
+```powershell
+$session = "blind-REPLACE_WITH_EXISTING_16_HEX_DIGITS"
+python .\tools\agy_blind_audio.py recover --session $session
+python .\tools\agy_blind_audio.py evaluate --session $session --max-cer 0.25
+```
+
+Recovery requires a matching unchanged MP3 hash, existing successful CLI
+status, an observed MP3 `read_file` tool call in the archived stream,
+no disallowed tools, exactly one successful terminal result and strictly
+parseable JSON with a valid verdict/segment schema.
+
+The extracted response goes only into the separate private root:
+`%LOCALAPPDATA%\AGYBlindAudio\truth\<session>\recoveries`.
+It is **never copied into the model workspace**, published, or printed. The
+original AGY stdout/stderr and any preexisting answer are never overwritten.
+`UNPARSEABLE_TERMINAL_JSON` or `EMPTY_TERMINAL_RESPONSE`
+means the response cannot be recovered from this format. It is **not** evidence
+that the audio was unheard.
+
+For future runs, the harness also automatically attempts this strict recovery
+once after a successful headless request. It still records the provenance
+separately; a model reply is not proof of the backend binary transport.
+
 ### Step 3 — Evaluate (offline; does not call any model)
 
 ```powershell
@@ -126,6 +158,10 @@ or imply zero error in real-world news transcription.
   file/command calls, and prefer isolated credentials/workstation.
 - Synthetic SAPI speech is easier than spontaneous speech; passing the test
   does not validate real-world speaker diversity or timestamp alignment.
+- Strict response recovery accepts only a single JSON object (or an entire
+  fenced JSON block); descriptive prose with embedded JSON is not treated
+  as a verified structured response. Explicit agent replies can also be
+  incomplete despite a successful CLI exit.
 - Unit tests mock the audio encoder and agent and never spend a model token.
   Actual speech synthesis and headless AGY response must be checked on Windows.
 - AGY headless `stream-json` includes tool activity; unknown protocol
