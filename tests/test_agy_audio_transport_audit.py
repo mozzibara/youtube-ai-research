@@ -157,6 +157,57 @@ class AudioByteReceiptAuditTests(unittest.TestCase):
         self.assertEqual(out["assessment"], "NO_TARGET_READ_CALL")
         self.assertNotIn("PRIVATE_VALUE", json.dumps(out))
 
+    def test_real_cli_name_at_step_level_is_not_lost(self):
+        """Earlier blind evaluator accepts step.tool_name when info.name absent."""
+        row = self._call(result=self._inline())
+        info = row["step_update"]["tool_info"]
+        row["step_update"]["tool_name"] = info.pop("name")
+        self._trace(row)
+        trial = self._trial()
+        self.assertTrue(trial["target_read_call_observed"])
+        self.assertEqual(trial["assessment"], "MATCHED_CLI_TOOL_RESULT_BYTES")
+        self.assertFalse(trial["model_ingress_verified"])
+
+    def test_parameters_are_json_string_in_event(self):
+        row = self._call()
+        info = row["step_update"]["tool_info"]
+        info["parameters"] = json.dumps({"file_path": "C:/hidden/clip_00_30.mp3"})
+        self._trace(row)
+        self.assertTrue(self._trial()["target_read_call_observed"])
+        self.assertEqual(self._trial()["assessment"], "NO_TOOL_RESULT_AUDIO_BYTES")
+
+    def test_existing_provenance_recognized_but_byte_parser_unsupported(self):
+        """Old read_file inspector sees this; missing strict path must not say no read."""
+        row = self._call()
+        row["step_update"]["tool_info"]["parameters"] = {
+            "nested_cli_parameters": {"input_file": "D:/secret/clip_00_30.mp3"}
+        }
+        self._trace(row)
+        trial = self._trial()
+        self.assertEqual(trial["assessment"], "TARGET_READ_CALL_SHAPE_UNSUPPORTED")
+        self.assertTrue(trial["target_read_call_observed"])
+        self.assertFalse(trial["exact_mp3_bytes_in_tool_result"])
+        self.assertTrue(trial["legacy_provenance_only"])
+
+    def test_model_text_is_not_provenance_fallback(self):
+        self._trace({"event": "result", "result": {
+            "response": "I read clip_00_30.mp3", "status": "SUCCESS"}})
+        trial = self._trial()
+        self.assertEqual(trial["assessment"], "NO_TARGET_READ_CALL")
+        self.assertFalse(trial["target_read_call_observed"])
+
+    def test_no_byte_match_in_unsupported_cli_shape_even_if_blob_present(self):
+        row = self._call(result=self._inline())
+        info = row["step_update"]["tool_info"]
+        info["parameters"] = {"nested_cli_parameters": {
+            "input_file": "D:/secret/clip_00_30.mp3"
+        }}
+        self._trace(row)
+        trial = self._trial()
+        self.assertEqual(trial["assessment"], "TARGET_READ_CALL_SHAPE_UNSUPPORTED")
+        self.assertFalse(trial["exact_mp3_bytes_in_tool_result"])
+        self.assertEqual(trial["tool_result_audio_payload_count"], 0)
+
     def test_invalid_session_refused(self):
         with self.assertRaises(ValueError):
             audit.audit_session(self.private_root, "../unsafe")
