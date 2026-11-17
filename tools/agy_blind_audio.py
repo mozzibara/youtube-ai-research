@@ -237,9 +237,14 @@ def run_trial(private_root: Path, session: str, case_id: str, submit: bool,
             status = {"submitted": True, "exit_code": None,
                       "timed_out": True, "auto_approve": auto_approve}
     _json(status_file, status)
+    recovery = recover_case(priv, manifest, match[0]) if (
+        not answer.exists() and status["exit_code"] == 0
+        and not status["timed_out"]) else {"recovery": "NOT_ELIGIBLE"}
     return {"trial": case_id, "submitted": True, "exit_code": status["exit_code"],
             "timed_out": status["timed_out"],
             "answer_present": answer.is_file(),
+            "answer_recovered": recovery["recovery"] == "RECOVERED_FROM_TERMINAL_JSON",
+            "recovery_status": recovery["recovery"],
             "raw_cli_log_private": True}
 
 
@@ -577,7 +582,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "run" and args.submit:
         trials = result.get("trials", [result])
         if any(x.get("exit_code") != 0 or x.get("timed_out")
-               or not x.get("answer_present") for x in trials):
+               or not (x.get("answer_present") or x.get("answer_recovered"))
+               for x in trials):
             return 2
     return 0
 
