@@ -56,11 +56,21 @@ def classify_stderr(raw: str) -> dict:
     signature = next((cat for cat in categories
                       if cat != "GENERIC_PERMISSION_DENIAL"),
                      "GENERIC_PERMISSION_DENIAL" if categories else "NO_DENIAL_PATTERN")
+    required_match = re.search(
+        r"tool required the [\"']([a-z_]+)[\"'] permission",
+        raw, re.IGNORECASE
+    )
+    required_kind = (required_match.group(1).lower()
+                     if required_match else "")
+    required_kind = (required_kind
+                     if required_kind in KNOWN_TOOL_MENTIONS
+                     else "UNKNOWN_OR_NOT_STATED")
     mentioned = sorted(tool for tool in KNOWN_TOOL_MENTIONS
                        if re.search(r"(?<![a-z_])" + re.escape(tool) +
                                     r"(?![a-z_])", raw, re.IGNORECASE))
     return {
         "signature": signature,
+        "headless_required_permission_kind": required_kind,
         "matched_categories": categories,
         "known_tools_mentioned": mentioned,
         "stderr_has_auth_or_quota_hint": bool(re.search(
