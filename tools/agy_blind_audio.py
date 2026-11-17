@@ -776,8 +776,41 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
             if condition == "tone":
                 tone_count_match = (type(reported_beeps) is int and
                                     reported_beeps == item.get("beep_count"))
-        error = cer(item["reference"], text) if condition == "speech" else None
-        nonce = normalize(item["nonce"]) in normalize(text) if condition == "speech" else None
+        # Missing/invalid answers cannot yield a measurable CER or nonce match.
+        measurable_speech = (condition == "speech"
+                             and verdict not in {"MISSING", "INVALID"})
+        error = cer(item["reference"], text) if measurable_speech else None
+        nonce = (normalize(item["nonce"]) in normalize(text)
+                 if measurable_speech else None)
+        # A rejected JSON response may still contain a clear wrong acoustic
+        # class. Record that behavioral error separately, without relaxing
+        # the strict contract or recovering an invalid answer.
+        rejected_response_category = None
+        rejected_response_acoustic_class = None
+        observed_wrong_class = False
+        if (output_contract == ACOUSTIC_CONTRACT and source == "missing"
+                and matched and completed and
+                provenance["mp3_read_call_observed"] and
+                provenance["terminal_success_observed"] and
+                not provenance["other_tool_calls_observed"]):
+            _, raw_terminal_response = _terminal_response_from_stream(
+                priv / (item["id"] + ".ndjson"))
+            if raw_terminal_response is not None:
+                evidence = _categorize_response_validation(
+                    raw_terminal_response, ACOUSTIC_CONTRACT)
+                rejected_response_category = evidence["validation_category"]
+                claimed = evidence["reported_acoustic_class"]
+                if claimed in ACOUSTIC_CLASSES:
+                    rejected_response_acoustic_class = claimed
+                observed_wrong_class = bool(
+                    condition in {"tone", "silence"}
+                    and rejected_response_category ==
+                    "ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT"
+                    and evidence["reported_verdict"] == "NO_SPEECH"
+                    and evidence["reported_audio_analyzed"] is True
+                    and evidence["reported_segments_count"] == 0
+                    and rejected_response_acoustic_class is not None
+                    and rejected_response_acoustic_class != condition.upper())
         host_output_isolation = (output_contract not in {
             "host_terminal_json_v2", ACOUSTIC_CONTRACT}
             or source == "private_terminal_recovery")
@@ -792,6 +825,14 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
             and bool(text.strip()) and error <= threshold and nonce
             or condition in {"silence", "tone"} and verdict == "NO_SPEECH"
             and not text.strip()))
+        trial_outcome = (
+            "PASS" if ok else
+            "FAIL_OBSERVED_ACOUSTIC_MISCLASSIFICATION"
+            if observed_wrong_class else
+            "INCOMPLETE_UNRECOVERED_TERMINAL_RESPONSE"
+            if source == "missing" else
+            "FAIL_STRICT_EVALUATION"
+        )
         cases.append({"trial": item["id"], "kind": condition,
                       "verdict": verdict, "cer": round(error, 4) if error is not None else None,
                       "nonce_recognized": nonce, "audio_analyzed_reported": analyzed,
@@ -801,6 +842,10 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "acoustic_class_reported": acoustic_class,
                       "acoustic_class_match": acoustic_class_match,
                       "tone_count_match": tone_count_match,
+                      "rejected_terminal_validation_category": rejected_response_category,
+                      "observed_rejected_acoustic_class": rejected_response_acoustic_class,
+                      "observed_acoustic_misclassification": observed_wrong_class,
+                      "trial_outcome": trial_outcome,
                       "host_output_isolation": host_output_isolation,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
                       "other_tool_calls_observed": provenance["other_tool_calls_observed"],
@@ -814,14 +859,23 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
     sufficient = (len(speech) >= 3 and len(silence) >= 1 and len(tones) >= 1
                   if manifest["schema"] == "agy_blind_audio_v2" else
                   len(speech) >= 3 and len(silence) >= 2)
-    overall = ("INCOMPLETE" if not all_complete else
-               "FAIL_AUDIO_DISCRIMINATION" if not all(x["pass"] for x in cases)
-               else "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
-               "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
+    # An explicit wrong acoustic class is a decisive behavioral failure even
+    # if contradictory beep_count makes the terminal JSON unrecoverable.
+    # Contract completeness remains false; never create a passing answer.
+    confirmed_misclassification = any(
+        x["observed_acoustic_misclassification"] for x in cases)
+    overall = (
+        "FAIL_AUDIO_DISCRIMINATION" if confirmed_misclassification else
+        "INCOMPLETE" if not all_complete else
+        "FAIL_AUDIO_DISCRIMINATION" if not all(x["pass"] for x in cases) else
+        "PROVISIONAL_INSUFFICIENT_TRIALS" if not sufficient else
+        "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION"
+    )
     report = {"schema": "agy_blind_audio_evaluation_v1", "session": session,
               "total_trials": len(cases), "speech_trials": len(speech),
               "tone_trials": len(tones), "silence_trials": len(silence),
               "all_complete": all_complete,
+              "confirmed_acoustic_misclassification": confirmed_misclassification,
               "threshold_cer": threshold, "overall": overall, "trials": cases,
               "independent_binary_transport_verified": False,
               "note": "Behavioral blind test; no raw transcript or answer key is printed."}

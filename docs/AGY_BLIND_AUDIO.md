@@ -138,6 +138,45 @@ returns empty output, diagnose that **new** session offline with
 `agy_blind_diagnose.py`; do not bypass permissions or repeat
 the same trial.
 
+### Verified silent-audio misclassification (archived v3 session)
+
+The existing session `blind-cbbaf1380fa34098` has a strong but
+mixed behavioral result:
+
+- Korean speech: correct transcription, private six-digit nonce, CER 0.0
+- Random beep-only audio: correct TONE class and private count
+- Silence `case-02f20b1521f5`: the terminal response claims
+  `NO_SPEECH`, `audio_analyzed=true`, and
+  `acoustic_class=TONE` although the private ground-truth
+  class is **SILENCE**. Its integer beep_count also conflicts with the
+  strict TONE contract, so the response must **not** be auto-recovered as
+  a valid structured answer.
+
+This is an observed **acoustic false positive**, not simply missing output.
+The scorer now checks whether a rejected terminal JSON contains a clear
+incorrect acoustic class with a valid NO_SPEECH claim, 0 segments and
+analyzed flag, **only** when audio hashes, successful CLI status and
+read_file-only tool provenance all agree. In that narrow case it reports:
+
+`overall=FAIL_AUDIO_DISCRIMINATION` and
+`observed_acoustic_misclassification=true` for the affected
+trial. `all_complete=false` correctly indicates that the
+strict v3 response was not recoverable; it is not a behavioral pass.
+
+Any malformed text, unknown class, missing terminal response or unverified
+provenance still stays `INCOMPLETE`. Original private AGY streams,
+media and model responses are never rewritten, and no extra model requests
+are made when re-evaluating:
+
+```powershell
+git pull --ff-only origin main
+python .\tools\agy_blind_audio.py evaluate --session blind-cbbaf1380fa34098 --max-cer 0.25
+```
+
+This behavioral evidence supports real speech/tone perception, but not
+independent proof of internal audio binary transfer. A one-trial failure
+does not establish a general silence error rate.
+
 ### Offline diagnosis of an unparseable final response
 
 A real 1+1+1 v3 session `blind-cbbaf1380fa34098` yielded a
@@ -172,8 +211,10 @@ nonce answers or stderr. It outputs only allowlisted labels for:
 
 Other categories are similarly constrained. Known reported verdict/class
 labels reflect **only what the model claimed**, never the hidden answer
-key. The diagnostics do not infer actual audio binary transport or change
-the prior `INCOMPLETE` report.
+key. The diagnostic itself never alters existing archived evidence. The
+separate evaluator may report an explicit behavioral FAIL when an invalid
+response contains a confirmed, ground-truth acoustic class mismatch;
+otherwise ambiguous responses remain INCOMPLETE.
 
 If the terminal response is merely malformed, review the contract
 mismatch before deciding whether a narrowly scoped, source-preserving
