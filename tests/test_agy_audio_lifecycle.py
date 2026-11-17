@@ -171,6 +171,101 @@ class LifecycleAuditTests(unittest.TestCase):
             self.skipTest("No symlink privileges")
         self.assertEqual(self._trial()["trace_status"], "UNSAFE_TRACE")
 
+    def _return_envelopes(self):
+        with patch.object(audit.subprocess, "run",
+                          side_effect=AssertionError("No model execution")):
+            return audit.inspect_return_envelope_session(self.private_root, SESSION)
+
+    def test_return_envelope_deduplicates_target_step_before_followups(self):
+        first = self._row(7, status=None)
+        second = self._row(7, status=None)
+        second["step_update"]["tool_info"]["status"] = "COMPLETED"
+        self._trace(first, second, {"event": "step_update", "step_update": {
+            "step_type": "generic", "source": "SYSTEM",
+            "content": "PRIVATE_TOOL_CONTENT"}},
+            {"event": "result", "result": {
+                "response": "PRIVATE_TRANSCRIPTION", "status": "SUCCESS"}})
+        report = self._return_envelopes()
+        trial = report["trials"][0]
+        self.assertEqual(trial["target_step_group_count"], 1)
+        self.assertEqual(trial["target_status_slots"]["step.status"], ["NULL"])
+        self.assertEqual(trial["target_status_slots"]["tool_info.status"],
+                         ["MISSING", "STRING"])
+        self.assertEqual(trial["target_known_status_labels"], ["COMPLETED"])
+        self.assertEqual(trial["return_assessment"], "ADJACENT_UNTYPED_EVENTS_ONLY")
+        self.assertEqual(trial["adjacent_envelopes"][0]["event_kind"], "STEP_UPDATE")
+        self.assertEqual(trial["adjacent_envelopes"][0]["step_subtype"], "GENERIC")
+        self.assertEqual(trial["adjacent_envelopes"][0]["content_type"], "STRING")
+        self.assertEqual(trial["adjacent_envelopes"][1]["event_kind"], "TERMINAL_RESULT")
+        self.assertFalse(trial["model_ingress_verified"])
+        dumped = json.dumps(report)
+        for private in ("PRIVATE_TOOL_CONTENT", "PRIVATE_TRANSCRIPTION", "clip_00_30.mp3"):
+            self.assertNotIn(private, dumped)
+
+    def test_explicit_typed_tool_result_is_only_unlinked_candidate(self):
+        self._trace(self._row(2), {"event": "tool_result", "source": "TOOL",
+                    "result": {"parts": [{"inline_data": {
+                        "mime_type": "audio/mpeg", "data": "PRIVATE_AUDIO_BINARY"}}]}})
+        trial = self._return_envelopes()["trials"][0]
+        self.assertEqual(trial["return_assessment"], "UNLINKED_TYPED_RESULT_CANDIDATE")
+        self.assertTrue(trial["typed_result_candidate_observed"])
+        self.assertEqual(trial["adjacent_envelopes"][0]["event_kind"], "TOOL_RESULT")
+        self.assertEqual(trial["adjacent_envelopes"][0]["source_label"], "TOOL")
+        self.assertFalse(trial["independent_binary_transport_verified"])
+        self.assertNotIn("PRIVATE_AUDIO_BINARY", json.dumps(trial))
+
+    def test_unknown_event_names_and_raw_keys_are_never_echoed(self):
+        self._trace(self._row(2), {"event": "PRIVATE_EVENT_WITH_SECRET",
+                    "private_field": "SENSITIVE", "step_update": {
+                        "step_type": "SECRET_KIND", "content": "SECRET_CONTENT"}})
+        trial = self._return_envelopes()["trials"][0]
+        self.assertEqual(trial["adjacent_envelopes"][0]["event_kind"], "OTHER")
+        dumped = json.dumps(trial)
+        for secret in ("PRIVATE_EVENT_WITH_SECRET", "private_field",
+                       "SENSITIVE", "SECRET_KIND", "SECRET_CONTENT"):
+            self.assertNotIn(secret, dumped)
+
+    def test_terminal_response_is_never_accepted_as_tool_result(self):
+        self._trace(self._row(2), {"event": "result", "result": {
+            "status": "SUCCESS", "response": {
+                "mime_type": "audio/mpeg", "data": "MODEL_WRITTEN_BYTES"}}})
+        trial = self._return_envelopes()["trials"][0]
+        self.assertEqual(trial["return_assessment"], "ADJACENT_UNTYPED_EVENTS_ONLY")
+        self.assertFalse(trial["typed_result_candidate_observed"])
+        self.assertFalse(trial["model_ingress_verified"])
+
+    def test_only_after_last_target_event_is_inspected(self):
+        self._trace({"event": "tool_result", "source": "TOOL",
+                     "result": {"data": "PRIVATE_BEFORE"}},
+                    self._row(3), self._row(3),
+                    {"event": "step_update", "step_update": {
+                        "step_type": "generic", "content": "PRIVATE_AFTER"}})
+        trial = self._return_envelopes()["trials"][0]
+        self.assertEqual(trial["target_step_group_count"], 1)
+        self.assertEqual(trial["return_assessment"], "ADJACENT_UNTYPED_EVENTS_ONLY")
+        self.assertFalse(trial["typed_result_candidate_observed"])
+        self.assertEqual(len(trial["adjacent_envelopes"]), 1)
+
+    def test_return_envelope_direct_cli_and_no_file_writes(self):
+        self._trace(self._row(1), {"event": "step_update", "step_update": {
+            "step_type": "message", "content": "PRIVATE_MESSAGE"}})
+        before = {str(p): p.read_bytes() for p in self.private.rglob("*")
+                  if p.is_file()}
+        result = self._return_envelopes()
+        after = {str(p): p.read_bytes() for p in self.private.rglob("*")
+                 if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertFalse(result["model_called"])
+        exe = Path(__file__).resolve().parents[1] / "tools" / "agy_audio_transport_audit.py"
+        proc = subprocess.run(
+            [sys.executable, str(exe), "--inspect-return-envelope",
+             "--session", SESSION, "--private-root", str(self.private_root)],
+            cwd=exe.parents[1], capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(json.loads(proc.stdout)["schema"],
+                         "agy_cli_audio_return_envelope_v1")
+        self.assertNotIn("PRIVATE_MESSAGE", proc.stdout)
+
     def test_read_only_private_path_and_cli(self):
         self._trace(self._row(5), self._row(5))
         before = {str(p): p.read_bytes() for p in self.private.rglob("*")
