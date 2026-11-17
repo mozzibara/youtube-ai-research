@@ -138,6 +138,48 @@ returns empty output, diagnose that **new** session offline with
 `agy_blind_diagnose.py`; do not bypass permissions or repeat
 the same trial.
 
+### Offline diagnosis of an unparseable final response
+
+A real 1+1+1 v3 session `blind-cbbaf1380fa34098` yielded a
+passing spoken-Korean trial (CER 0.0, nonce match) and a passing beep-only
+trial (correct acoustic class and secret beep count). The silence trial
+`case-02f20b1521f5` exited with SUCCESS and read_file provenance
+but its final result did **not** satisfy the strict v3 JSON contract. It
+must remain INCOMPLETE until the failure is classified: this is not proof
+of fabricated speech or of an inability to perceive silence.
+
+To diagnose the existing archived responses without further model calls:
+
+```powershell
+git pull --ff-only origin main
+python .\tools\agy_blind_audio.py diagnose-response --session blind-cbbaf1380fa34098
+```
+
+This command is **read-only**. It never writes or prints full model output,
+transcriptions, unknown field names/values, MP3, private references,
+nonce answers or stderr. It outputs only allowlisted labels for:
+
+- `INVALID_JSON_SYNTAX_OR_ADDITIONAL_TEXT`: final output is not
+  a standalone JSON object
+- `AUDIO_ANALYZED_NOT_BOOLEAN`: wrong type or missing field
+- `VERDICT_SEGMENTS_OR_ANALYSIS_CONFLICT`: verdict and
+  speech segments or analyzed flag disagree
+- `ACOUSTIC_CLASS_MISSING_OR_INVALID`: acoustic class absent
+  or outside the supported fixed enum
+- `ACOUSTIC_VERDICT_OR_BEEP_COUNT_CONFLICT`: class and beep
+  count are inconsistent with the verdict
+- `VALID_TERMINAL_JSON`: strict parser accepts the output
+
+Other categories are similarly constrained. Known reported verdict/class
+labels reflect **only what the model claimed**, never the hidden answer
+key. The diagnostics do not infer actual audio binary transport or change
+the prior `INCOMPLETE` report.
+
+If the terminal response is merely malformed, review the contract
+mismatch before deciding whether a narrowly scoped, source-preserving
+offline parser improvement is justified. Do **not** re-run completed trials
+or silently convert `NO_AUDIO_ACCESS` to `NO_SPEECH`.
+
 ### Three-condition acoustic classification and blinded beep count
 
 New CLI defaults: `--speech-count 3 --tone-count 1 --silence-count 1`.
