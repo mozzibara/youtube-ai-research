@@ -1,7 +1,7 @@
 param([Parameter(Mandatory=$true)][string]$OutputWav)
 $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.Speech
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 $text = [Console]::In.ReadToEnd()
 if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 500) { throw "INVALID_TTS_INPUT" }
 $voice = New-Object System.Speech.Synthesis.SpeechSynthesizer
