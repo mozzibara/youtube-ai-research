@@ -138,6 +138,42 @@ returns empty output, diagnose that **new** session offline with
 `agy_blind_diagnose.py`; do not bypass permissions or repeat
 the same trial.
 
+### Definitive wrong tone-count evidence in strict-rejected JSON
+
+The second full v3 session also returned an unrecoverable tone-only answer
+with `verdict=NO_SPEECH`, `acoustic_class=TONE`,
+`audio_analyzed=true`, zero speech segments, and an integer
+`beep_count` that contradicted the v3 tone contract.
+Since valid tone input in this harness always contains a **private
+2–5-beep count**, and the strict parser permits a TONE integer only within
+2–5, these specific conditions prove a wrong count without revealing the
+reported or expected count.
+
+The evaluator now emits
+`confirmed_tone_count_error=true`, with the affected trial
+marked `FAIL_OBSERVED_TONE_COUNT_ERROR` and the evidence source
+`REJECTED_TERMINAL_RESPONSE`. It does **not** recover the
+invalid JSON, change `all_complete=false`, guess the observed
+beep number, or overwrite any archived files. For a valid recovered TONE
+answer whose count differs from the hidden reference, the evidence source
+is instead `VALIDATED_PRIVATE_TERMINAL_RESPONSE`.
+
+Non-integer, null, missing or boolean beep-count fields remain contract
+failures, but are **not** promoted to demonstrated acoustic counting errors
+because the model did not provide a valid integer count. Provenance, status,
+and unchanged media hashes must also be present.
+
+Re-evaluate offline with no further model requests:
+
+```powershell
+git pull --ff-only origin main
+python .\tools\agy_blind_audio.py evaluate --session blind-ecc67afd26534f13 --max-cer 0.25
+```
+
+The validated findings now distinguish:
+(1) speech transcription accuracy, (2) silent-audio false tone detection,
+and (3) tone count mistakes, rather than labeling (3) as missing output.
+
 ### Full 3+1+1 session: confirmed silence false positive despite an incomplete tone
 
 The independent full session `blind-ecc67afd26534f13`
@@ -147,8 +183,9 @@ All three speech trials correctly restored their private random nonces
 its JSON was a **strict-valid** `NO_SPEECH/TONE` answer.
 The tone-only trial separately returned an unparseable final v3 JSON with
 the claimed `TONE` class and an inconsistent beep_count.
-The tone count cannot be credited as either PASS or confirmed wrong count
-from the published diagnostic fields alone.
+The invalid TONE integer is outside the allowed 2–5-beep range;
+the enhanced evaluator now reports it as a confirmed count error, while
+keeping strict recovery incomplete.
 
 The evaluator now recognizes confirmed wrong acoustic classes from both:
 (1) valid host-captured answers and (2) otherwise structured but rejected
