@@ -543,3 +543,36 @@ credentials nor changes the user's AGY permissions.
 
 CI uses fabricated MP3-like bytes and synthetic tool event fixtures only.
 Real private audio is never published to Git or GitHub Actions.
+
+
+### Redacted event-envelope probe after unsupported target-read shapes
+
+The archived full 3+1+1 session `blind-ecc67afd26534f13` returned
+`TARGET_READ_CALL_SHAPE_UNSUPPORTED` for five cases under the newer
+byte-level parser. The earlier blind evaluator had already observed five
+target `read_file` calls. **This is a parser-compatibility gap, not five
+new failures to read audio**; it neither confirms nor denies MP3 delivery.
+
+Run the new *different* offline shape probe once; there is no reason to
+re-run `evaluate`, `diagnose-response`, `recover`, or the AGY model:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-shape
+```
+
+The probe reads only existing `*.ndjson` metadata and emits a fixed,
+privacy-safe vocabulary: parameter envelope type, allowlisted known
+parameter **key names**, count of unknown top-level keys, known tool-name
+location, and whether known tool result envelope keys exist. It **never**
+prints unknown dictionary keys, parameter values, paths, audio data,
+transcripts, credentials, prompt content or model answers. It never
+downloads data, invokes AGY, or modifies archived evidence.
+
+A `UNSCOPED_LEGACY_REFERENCE` is specifically not a trusted audio byte
+receipt: the old inspector found the target string somewhere in serialized
+parameters, while the newer strict parser needs an explicit typed input
+path. Use the shape-probe output to design a constrained parser for the
+actually observed AGY schema, with synthetic red/green fixtures. Do not
+accept an arbitrary nested string match as proof of audio transfer or
+silently turn the known five trials into a `PASS`.
