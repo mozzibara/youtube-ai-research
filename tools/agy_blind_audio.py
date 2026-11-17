@@ -788,6 +788,22 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
         rejected_response_category = None
         rejected_response_acoustic_class = None
         observed_wrong_class = False
+        wrong_class_evidence_source = None
+        # A valid recovered JSON is still a failed experiment if the model
+        # reports a sound class different from the secret input condition.
+        # The previous detector covered only rejected terminal JSON.
+        if (output_contract == ACOUSTIC_CONTRACT
+                and source == "private_terminal_recovery"
+                and condition in {"tone", "silence"}
+                and verdict == "NO_SPEECH" and analyzed and not text.strip()
+                and acoustic_class in {"TONE", "SILENCE"}
+                and acoustic_class != condition.upper()
+                and matched and completed
+                and provenance["mp3_read_call_observed"]
+                and provenance["terminal_success_observed"]
+                and not provenance["other_tool_calls_observed"]):
+            observed_wrong_class = True
+            wrong_class_evidence_source = "VALIDATED_PRIVATE_TERMINAL_RESPONSE"
         if (output_contract == ACOUSTIC_CONTRACT and source == "missing"
                 and matched and completed and
                 provenance["mp3_read_call_observed"] and
@@ -811,6 +827,8 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                     and evidence["reported_segments_count"] == 0
                     and rejected_response_acoustic_class is not None
                     and rejected_response_acoustic_class != condition.upper())
+                if observed_wrong_class:
+                    wrong_class_evidence_source = "REJECTED_TERMINAL_RESPONSE"
         host_output_isolation = (output_contract not in {
             "host_terminal_json_v2", ACOUSTIC_CONTRACT}
             or source == "private_terminal_recovery")
@@ -845,6 +863,7 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
                       "rejected_terminal_validation_category": rejected_response_category,
                       "observed_rejected_acoustic_class": rejected_response_acoustic_class,
                       "observed_acoustic_misclassification": observed_wrong_class,
+                      "acoustic_misclassification_evidence_source": wrong_class_evidence_source,
                       "trial_outcome": trial_outcome,
                       "host_output_isolation": host_output_isolation,
                       "mp3_read_call_observed": provenance["mp3_read_call_observed"],
@@ -859,8 +878,9 @@ def evaluate(private_root: Path, session: str, threshold: float = 0.25) -> dict:
     sufficient = (len(speech) >= 3 and len(silence) >= 1 and len(tones) >= 1
                   if manifest["schema"] == "agy_blind_audio_v2" else
                   len(speech) >= 3 and len(silence) >= 2)
-    # An explicit wrong acoustic class is a decisive behavioral failure even
-    # if contradictory beep_count makes the terminal JSON unrecoverable.
+    # An explicit wrong acoustic class is a decisive behavioral failure for
+    # both strict-valid recovered responses and strict-rejected terminal JSON.
+    # A separate unrecovered tone response must not hide that observed failure.
     # Contract completeness remains false; never create a passing answer.
     confirmed_misclassification = any(
         x["observed_acoustic_misclassification"] for x in cases)

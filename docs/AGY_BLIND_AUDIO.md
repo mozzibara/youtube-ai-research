@@ -138,6 +138,43 @@ returns empty output, diagnose that **new** session offline with
 `agy_blind_diagnose.py`; do not bypass permissions or repeat
 the same trial.
 
+### Full 3+1+1 session: confirmed silence false positive despite an incomplete tone
+
+The independent full session `blind-ecc67afd26534f13`
+ran **3 Korean speech + 1 random tone + 1 exact silence** trials.
+All three speech trials correctly restored their private random nonces
+(CER 0.0). The silent MP3 was classified as `TONE` even though
+its JSON was a **strict-valid** `NO_SPEECH/TONE` answer.
+The tone-only trial separately returned an unparseable final v3 JSON with
+the claimed `TONE` class and an inconsistent beep_count.
+The tone count cannot be credited as either PASS or confirmed wrong count
+from the published diagnostic fields alone.
+
+The evaluator now recognizes confirmed wrong acoustic classes from both:
+(1) valid host-captured answers and (2) otherwise structured but rejected
+terminal answers. Both cases require matching private media hashes, successful
+CLI execution, the target MP3 read_file event and no disallowed tools.
+If a valid silence answer says `TONE`, the report includes
+`acoustic_misclassification_evidence_source=VALIDATED_PRIVATE_TERMINAL_RESPONSE`
+and `overall=FAIL_AUDIO_DISCRIMINATION`, even when another
+trial is still missing and `all_complete=false`. This prevents
+a confirmed acoustic false positive from being hidden by an unrelated
+unparseable output. It does not salvage the malformed tone answer or
+overwrite evidence.
+
+Recalculate the existing session with **zero AGY requests**:
+
+```powershell
+git pull --ff-only origin main
+python .\tools\agy_blind_audio.py evaluate --session blind-ecc67afd26534f13 --max-cer 0.25
+python .\tools\agy_blind_audio.py diagnose-response --session blind-ecc67afd26534f13
+```
+
+Treat a model's `NO_SPEECH` response separately from its
+`acoustic_class`: speech absence can be correct even as
+beep/tone presence is hallucinated. Three successful synthetic speech
+trials do not establish real YouTube-news transcription performance.
+
 ### Verified silent-audio misclassification (archived v3 session)
 
 The existing session `blind-cbbaf1380fa34098` has a strong but
