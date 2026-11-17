@@ -570,6 +570,85 @@ class BlindAudioTests(unittest.TestCase):
             self.assertEqual(item["output_contract"], "UNKNOWN_CONTRACT")
             self.assertNotIn("DO_NOT_EXPORT", json.dumps(report))
 
+    def test_valid_silence_tone_claim_is_confirmed_acoustic_failure(self):
+        """Strict-valid TONE JSON on SILENCE must be a confirmed FAIL."""
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._three_condition_fixture(td)
+            recovery = mod.recover(private.parent, SESSION)
+            self.assertTrue(all(x["recovery"] == "RECOVERED_FROM_TERMINAL_JSON"
+                                for x in recovery["cases"]))
+            silence_id = "case-000000000004"
+            path = private / "recoveries" / (silence_id + ".response.json")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["acoustic_class"] = "TONE"
+            payload["beep_count"] = 3
+            self.assertIsNotNone(mod._parse_terminal_json_response(
+                json.dumps(payload), contract=mod.ACOUSTIC_CONTRACT))
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch.object(mod.subprocess, "run",
+                              side_effect=AssertionError("No model calls")):
+                scored = mod.evaluate(private.parent, SESSION)
+            self.assertTrue(scored["all_complete"])
+            self.assertTrue(scored["confirmed_acoustic_misclassification"])
+            self.assertEqual(scored["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            case = next(x for x in scored["trials"] if x["trial"] == silence_id)
+            self.assertEqual(case["verdict"], "NO_SPEECH")
+            self.assertEqual(case["acoustic_class_reported"], "TONE")
+            self.assertFalse(case["acoustic_class_match"])
+            self.assertTrue(case["observed_acoustic_misclassification"])
+            self.assertEqual(case["acoustic_misclassification_evidence_source"],
+                             "VALIDATED_PRIVATE_TERMINAL_RESPONSE")
+            self.assertEqual(case["trial_outcome"],
+                             "FAIL_OBSERVED_ACOUSTIC_MISCLASSIFICATION")
+            self.assertFalse(case["pass"])
+            self.assertFalse(any(runtime.rglob("answer.json")))
+
+    def test_valid_silence_misclassification_overrides_unrecovered_tone(self):
+        """Exact real 3+1+1 shape: 3 speech PASS, 1 tone missing, silence TONE."""
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            mod.recover(private.parent, SESSION)
+            silence_id = "case-000000000004"
+            tone_id = "case-000000000003"
+            path = private / "recoveries" / (silence_id + ".response.json")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.update({"acoustic_class": "TONE", "beep_count": 3})
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            (private / "recoveries" / (tone_id + ".response.json")).unlink()
+            score = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(score["all_complete"])
+            self.assertEqual(score["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            self.assertTrue(score["confirmed_acoustic_misclassification"])
+            self.assertEqual(sum(x["pass"] for x in score["trials"]), 3)
+            tone = next(x for x in score["trials"] if x["trial"] == tone_id)
+            self.assertEqual(tone["trial_outcome"],
+                             "INCOMPLETE_UNRECOVERED_TERMINAL_RESPONSE")
+            silent = next(x for x in score["trials"] if x["trial"] == silence_id)
+            self.assertEqual(silent["trial_outcome"],
+                             "FAIL_OBSERVED_ACOUSTIC_MISCLASSIFICATION")
+
+    def test_valid_wrong_class_without_read_file_provenance_not_confirmed(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            mod.recover(private.parent, SESSION)
+            cid = "case-000000000004"
+            path = private / "recoveries" / (cid + ".response.json")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload.update({"acoustic_class": "TONE", "beep_count": 3})
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            trace = private / (cid + ".ndjson")
+            rows = [json.loads(x) for x in trace.read_text(
+                encoding="utf-8").splitlines()]
+            trace.write_text("\n".join(json.dumps(x) for x in rows
+                               if x.get("event") != "step_update") + "\n",
+                             encoding="utf-8")
+            score = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(score["confirmed_acoustic_misclassification"])
+            self.assertEqual(score["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            case = next(x for x in score["trials"] if x["trial"] == cid)
+            self.assertFalse(case["observed_acoustic_misclassification"])
+            self.assertIsNone(case["acoustic_misclassification_evidence_source"])
+
     def test_invalid_silence_tone_claim_is_decisive_failure_not_missing(self):
         """Match observed real case: NO_SPEECH/TONE/int=0 for a silent MP3."""
         with tempfile.TemporaryDirectory() as td:
