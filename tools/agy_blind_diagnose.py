@@ -96,8 +96,8 @@ def analyze_trace(trace: Path, stderr_path: Path) -> dict:
         if stderr_path.is_symlink() or stderr_path.stat().st_size > MAX_LOG_BYTES:
             raise ValueError("Refusing symlink or oversized stderr")
         raw_stderr = stderr_path.read_text(encoding="utf-8-sig", errors="replace")
-    denied_stderr = bool(DENIAL.search(raw_stderr))
     stderr_summary = classify_stderr(raw_stderr)
+    denied_stderr = stderr_summary["signature"] != "NO_DENIAL_PATTERN"
     if not trace.exists():
         return {"trace_present": False, "stderr_permission_denial_hint": denied_stderr,
                 "stderr_permission_fingerprint": stderr_summary,
