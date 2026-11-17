@@ -17,6 +17,8 @@ from pathlib import Path
 import re
 import subprocess  # Reserved for test-enforced guarantee: no process is run.
 
+from tools.agy_blind_audio import inspect_headless_trace
+
 SESSION_RE = re.compile(r"blind-[0-9a-f]{16}\Z")
 CASE_RE = re.compile(r"case-[0-9a-f]{12}\Z")
 SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
@@ -160,7 +162,14 @@ def _scan_trace(trace: Path, size: int, digest: str) -> dict:
         if not isinstance(step, dict) or step.get("step_type") != "tool":
             continue
         info = step.get("tool_info")
-        if not isinstance(info, dict) or not isinstance(info.get("name"), str) or info["name"].split(".")[-1] != "read_file":
+        if not isinstance(info, dict):
+            continue
+        # This mirrors the already-deployed blind evaluator's event vocabulary.
+        # AGY may store the tool name at step.tool_name rather than tool_info.name.
+        raw_name = info.get("name")
+        if not isinstance(raw_name, str):
+            raw_name = step.get("tool_name")
+        if not isinstance(raw_name, str) or raw_name.split(".")[-1] != "read_file":
             continue
         if not _target_argument(info.get("parameters")):
             continue
@@ -234,6 +243,7 @@ def _case_report(priv: Path, manifest: dict, item: dict) -> dict:
         "inline_audio_payload_seen": False,
         "exact_mp3_bytes_in_tool_result": False,
         "malformed_trace_lines_observed": False,
+        "legacy_provenance_only": False,
         # A local CLI trace is never an independently trusted provider receipt.
         "model_ingress_verified": False,
         "independent_binary_transport_verified": False,
@@ -255,6 +265,17 @@ def _case_report(priv: Path, manifest: dict, item: dict) -> dict:
         result["assessment"] = "TRACE_MISSING"
     else:
         result.update(_scan_trace(trace, media.stat().st_size, digest))
+        # Reconcile against the established provenance parser used by
+        # evaluate/recover, which already recognized the user's archived
+        # target read_file calls. A protocol mismatch is not "no read call".
+        # Crucially, this fallback NEVER consumes an audio blob or asserts
+        # a byte match: strict payload correlation is still mandatory.
+        if result["assessment"] == "NO_TARGET_READ_CALL":
+            prior = inspect_headless_trace(trace)
+            if prior["mp3_read_call_observed"]:
+                result["assessment"] = "TARGET_READ_CALL_SHAPE_UNSUPPORTED"
+                result["target_read_call_observed"] = True
+                result["legacy_provenance_only"] = True
     return result
 
 
