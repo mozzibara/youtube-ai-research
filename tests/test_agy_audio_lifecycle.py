@@ -69,11 +69,20 @@ class LifecycleAuditTests(unittest.TestCase):
         self.assertEqual(out["repeated_step_index_groups"], 1)
         self.assertEqual(out["distinct_call_id_count"], 1)
         self.assertTrue(out["repeat_update_possible"])
+        self.assertTrue(out["same_step_status_change_observed"])
+        self.assertEqual(out["tool_step_statuses"], ["DONE", "RUNNING"])
         self.assertEqual(out["distinct_argument_envelope_count"], 1)
         self.assertFalse(out["verified_distinct_file_reads"])
         self.assertFalse(out["independent_binary_transport_verified"])
         self.assertNotIn("opaque-id", json.dumps(out))
         self.assertNotIn("PRIVATE_TRANSCRIPT", json.dumps(out))
+
+    def test_unknown_private_status_does_not_leak(self):
+        self._trace(self._row(7, status="PRIVATE_STATE_VALUE"))
+        out = self._trial()
+        self.assertEqual(out["tool_step_statuses"], ["OTHER"])
+        self.assertFalse(out["same_step_status_change_observed"])
+        self.assertNotIn("PRIVATE_STATE_VALUE", json.dumps(out))
 
     def test_same_call_id_different_steps_remains_ambiguous(self):
         self._trace(self._row(7, call_id="opaque-id"),
