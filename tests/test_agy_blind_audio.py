@@ -2,7 +2,9 @@
 import hashlib
 import importlib.util
 import json
+from array import array
 from pathlib import Path
+import wave
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -47,7 +49,7 @@ class BlindAudioTests(unittest.TestCase):
                 output.write_bytes(b"FAKE_TEST_MP3")
             with patch.object(mod, "_encode_mp3", side_effect=media_stub), \
                  patch.object(mod.shutil, "which", return_value="/fake/ffmpeg"):
-                result = mod.prepare(runtime, private, 3, 2)
+                result = mod.prepare(runtime, private, 3, 2, tone_count=0)
             pub = Path(result["runtime"])
             manifest = json.loads(Path(result["private_manifest"]).read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["cases"]), 5)
@@ -304,6 +306,176 @@ class BlindAudioTests(unittest.TestCase):
                                 and row["answer_source"] == "private_terminal_recovery"
                                 for row in scored["trials"]))
             self.assertFalse(scored["independent_binary_transport_verified"])
+
+    def test_new_three_condition_plan_balanced_and_secret_tone_count(self):
+        cases = mod.plan(speech_count=3, silence_count=1, tone_count=1)
+        self.assertEqual(sorted(x["kind"] for x in cases),
+                         ["silence", "speech", "speech", "speech", "tone"])
+        tone = next(x for x in cases if x["kind"] == "tone")
+        self.assertIn(tone["beep_count"], mod.TONE_COUNTS)
+        self.assertEqual(tone["reference"], "")
+        self.assertNotIn("beep_count", mod.PROMPT)
+        self.assertIn("acoustic_class", mod.PROMPT)
+        self.assertIn("신호음", mod.PROMPT)
+        for invalid in (-1, 11):
+            with self.assertRaises(ValueError):
+                mod.plan(3, 1, invalid)
+
+    def test_synthetic_wav_has_exact_random_beep_count_and_30s_duration(self):
+        with tempfile.TemporaryDirectory() as td:
+            for count in (2, 3, 5):
+                path = Path(td) / f"tone{count}.wav"
+                with patch.object(mod.subprocess, "run",
+                                  side_effect=AssertionError("No external process")):
+                    mod._synthesize_tone_wav(path, count)
+                with wave.open(str(path), "rb") as audio:
+                    self.assertEqual(audio.getframerate(), 16000)
+                    self.assertEqual(audio.getnframes(), 480000)
+                    self.assertEqual(audio.getnchannels(), 1)
+                    self.assertEqual(audio.getsampwidth(), 2)
+                    samples = array("h")
+                    samples.frombytes(audio.readframes(480000))
+                # Count contiguous 100 ms windows with audible tone. This
+                # validates waveform, not only a synthetic manifest field.
+                chunks = [
+                    max(map(abs, samples[i:i + 1600])) > 2000
+                    for i in range(0, 480000, 1600)
+                ]
+                audible_starts = sum(active and (i == 0 or not chunks[i - 1])
+                                     for i, active in enumerate(chunks))
+                self.assertEqual(audible_starts, count)
+                self.assertTrue(all(x == 0 for x in samples[16000 * 8:]))
+            with self.assertRaises(ValueError):
+                mod._synthesize_tone_wav(Path(td) / "bad.wav", 0)
+            with self.assertRaises(ValueError):
+                mod._synthesize_tone_wav(Path(td) / "bad.wav", True)
+
+    def test_prepare_three_condition_workspace_does_not_reveal_class_or_beeps(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, truth = Path(td) / "media", Path(td) / "truth"
+            def fake_encoder(out, phrase, private_dir, **kwargs):
+                out.write_bytes(b"FAKE_MP3")
+            with patch.object(mod, "_encode_mp3", side_effect=fake_encoder), \
+                 patch.object(mod.shutil, "which", return_value="/fake/tool"), \
+                 patch.object(mod.subprocess, "run",
+                              side_effect=AssertionError("Must not call model")):
+                result = mod.prepare(runtime, truth, 1, 1, 1)
+            manifest = json.loads(Path(result["private_manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema"], "agy_blind_audio_v2")
+            self.assertEqual(len(manifest["cases"]), 3)
+            pub = Path(result["runtime"])
+            self.assertEqual(len(list(pub.rglob("clip_00_30.mp3"))), 3)
+            self.assertFalse(any(pub.rglob("*.json")))
+            tone = next(x for x in manifest["cases"] if x["kind"] == "tone")
+            self.assertIn(tone["beep_count"], mod.TONE_COUNTS)
+            for case in manifest["cases"]:
+                workspace = pub / case["id"]
+                self.assertEqual([x.name for x in workspace.iterdir()],
+                                 ["clip_00_30.mp3"])
+                self.assertNotIn(case["kind"], workspace.name)
+
+    def _three_condition_fixture(self, td):
+        runtime, private = self._fixture(td)
+        manifest_file = private / "manifest.json"
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        manifest["schema"] = "agy_blind_audio_v2"
+        manifest["cases"][3]["kind"] = "tone"
+        manifest["cases"][3]["beep_count"] = 3
+        for item in manifest["cases"]:
+            item.setdefault("beep_count", 0)
+            case_id = item["id"]
+            original = runtime / case_id / "answer.json"
+            answer = json.loads(original.read_text(encoding="utf-8"))
+            answer["acoustic_class"] = item["kind"].upper()
+            answer["beep_count"] = item["beep_count"]
+            # Tone and silence: no speech segments, regardless of event.
+            original.unlink()
+            status_path = private / (case_id + ".status.json")
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["output_contract"] = mod.ACOUSTIC_CONTRACT
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            trace_path = private / (case_id + ".ndjson")
+            rows = [json.loads(line) for line in trace_path.read_text(
+                encoding="utf-8").splitlines()]
+            rows[-1]["result"]["response"] = json.dumps(answer, ensure_ascii=False)
+            trace_path.write_text(
+                "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+                + "\n", encoding="utf-8")
+        manifest_file.write_text(json.dumps(manifest, ensure_ascii=False),
+                                 encoding="utf-8")
+        return runtime, private
+
+    def test_three_condition_host_captured_answers_pass_with_correct_counts(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime, private = self._three_condition_fixture(td)
+            with patch.object(mod.subprocess, "run",
+                              side_effect=AssertionError("No model requests")):
+                recovery = mod.recover(private.parent, SESSION)
+            self.assertEqual(
+                sum(x["recovery"] == "RECOVERED_FROM_TERMINAL_JSON"
+                    for x in recovery["cases"]), 5)
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(report["overall"], "PASS_BEHAVIORAL_AUDIO_DISCRIMINATION")
+            self.assertEqual(report["tone_trials"], 1)
+            self.assertEqual(report["silence_trials"], 1)
+            self.assertTrue(all(x["pass"] and x["acoustic_class_match"]
+                                for x in report["trials"]))
+            tone = next(x for x in report["trials"] if x["kind"] == "tone")
+            self.assertTrue(tone["tone_count_match"])
+            self.assertFalse(report["independent_binary_transport_verified"])
+            self.assertFalse(any(runtime.rglob("answer.json")))
+            self.assertNotIn("작은 풍선이", json.dumps(report, ensure_ascii=False))
+
+    def test_tone_claimed_silence_or_wrong_count_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            mod.recover(private.parent, SESSION)
+            tone = private / "recoveries" / "case-000000000003.response.json"
+            payload = json.loads(tone.read_text(encoding="utf-8"))
+            payload["beep_count"] = 2
+            tone.write_text(json.dumps(payload), encoding="utf-8")
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(report["overall"], "FAIL_AUDIO_DISCRIMINATION")
+            self.assertFalse(report["trials"][3]["tone_count_match"])
+            self.assertFalse(report["trials"][3]["pass"])
+            payload["acoustic_class"] = "SILENCE"
+            payload["beep_count"] = 0
+            tone.write_text(json.dumps(payload), encoding="utf-8")
+            report = mod.evaluate(private.parent, SESSION)
+            self.assertFalse(report["trials"][3]["acoustic_class_match"])
+            self.assertFalse(report["trials"][3]["pass"])
+
+    def test_three_way_insufficient_sample_is_provisional_not_full_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, private = self._three_condition_fixture(td)
+            manifest_file = private / "manifest.json"
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            manifest["cases"] = [manifest["cases"][0], manifest["cases"][3],
+                                 manifest["cases"][4]]
+            manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
+            mod.recover(private.parent, SESSION)
+            scored = mod.evaluate(private.parent, SESSION)
+            self.assertEqual(scored["overall"], "PROVISIONAL_INSUFFICIENT_TRIALS")
+            self.assertEqual((scored["speech_trials"], scored["tone_trials"],
+                              scored["silence_trials"]), (1, 1, 1))
+
+    def test_v3_parser_fail_closed_on_inconsistent_sound_class_or_count(self):
+        base = {"verdict": "NO_SPEECH", "audio_analyzed": True,
+                "segments": [], "acoustic_class": "TONE", "beep_count": 3}
+        self.assertIsNotNone(mod._parse_terminal_json_response(
+            json.dumps(base), contract=mod.ACOUSTIC_CONTRACT))
+        for bad in ({**base, "beep_count": True},
+                    {**base, "beep_count": 0},
+                    {**base, "acoustic_class": "SILENCE", "beep_count": 3},
+                    {**base, "acoustic_class": {"private": "secret"}},
+                    {**base, "verdict": "NO_AUDIO_ACCESS"},
+                    {**base, "audio_analyzed": False}):
+            self.assertIsNone(mod._parse_terminal_json_response(
+                json.dumps(bad), contract=mod.ACOUSTIC_CONTRACT))
+        no_access = {"verdict": "NO_AUDIO_ACCESS", "audio_analyzed": False,
+                     "segments": [], "acoustic_class": "UNAVAILABLE", "beep_count": None}
+        self.assertIsNotNone(mod._parse_terminal_json_response(
+            json.dumps(no_access), contract=mod.ACOUSTIC_CONTRACT))
 
     def test_evaluation_rejects_modified_audio(self):
         with tempfile.TemporaryDirectory() as td:
