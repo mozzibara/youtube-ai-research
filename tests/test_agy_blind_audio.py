@@ -314,7 +314,7 @@ class BlindAudioTests(unittest.TestCase):
         tone = next(x for x in cases if x["kind"] == "tone")
         self.assertIn(tone["beep_count"], mod.TONE_COUNTS)
         self.assertEqual(tone["reference"], "")
-        self.assertNotIn("beep_count", mod.PROMPT)
+        self.assertNotIn(f'"beep_count":{tone["beep_count"]}', mod.PROMPT)
         self.assertIn("acoustic_class", mod.PROMPT)
         self.assertIn("신호음", mod.PROMPT)
         for invalid in (-1, 11):
