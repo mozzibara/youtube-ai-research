@@ -210,10 +210,11 @@ def run_trial(private_root: Path, session: str, case_id: str, submit: bool,
         raise ValueError("Audio hash mismatch: refusing AGY request")
     answer = workspace / "answer.json"
     log = priv / (case_id + ".ndjson")
+    if not submit:
+        return {"trial": case_id, "submitted": False, "model": MODEL,
+                "previous_attempt_present": answer.exists() or log.exists()}
     if answer.exists() or log.exists():
         raise FileExistsError("Trial already attempted; original evidence must not be overwritten")
-    if not submit:
-        return {"trial": case_id, "submitted": False, "model": MODEL}
     if os.name != "nt":
         raise RuntimeError("Real AGY trials require Windows")
     agy = shutil.which("agy") or shutil.which("agy.cmd")
