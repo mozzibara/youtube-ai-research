@@ -198,6 +198,10 @@ def prepare(source_session: str, source_truth: Path, runtime: Path,
     if not SOURCE_RE.fullmatch(source_session):
         raise ValueError("Invalid source session ID")
     source_priv, source = _read_manifest(source_truth, source_session)
+    source_runtime = Path(source["runtime_root"]).resolve()
+    if any(source_runtime == root or source_runtime.is_relative_to(root)
+           or root.is_relative_to(source_runtime) for root in (runtime, truth)):
+        raise ValueError("Comparison roots must be separate from original runtime")
     _ffmpeg_binary("ffmpeg")
     _ffmpeg_binary("ffprobe")
     identifier = "compare-" + uuid.uuid4().hex[:16]
@@ -314,8 +318,10 @@ def import_response(truth: Path, session: str, trial: str,
         raise ValueError("Unsafe model response file")
     # The user saves this response manually, outside the AGY workspace.
     # This command never invokes AGY or overwrites existing evidence.
-    if response.resolve().is_relative_to(Path(manifest["runtime_root"]).resolve()):
-        raise ValueError("Response must not originate in model workspace")
+    if (response.resolve().is_relative_to(Path(manifest["runtime_root"]).resolve())
+            or response.resolve().is_relative_to(
+                Path(__file__).resolve().parents[1])):
+        raise ValueError("Response must be outside model workspace and Git repo")
     data = response.read_text(encoding="utf-8-sig")
     if _parse_answer(data) is None:
         raise ValueError("Response is not valid experiment JSON")
@@ -360,7 +366,10 @@ def score(truth: Path, session: str) -> dict:
                 audio_ok = (cl == "TONE" and not speech.strip()
                             and type(answer.get("beep_count")) is int
                             and answer["beep_count"] == src["beep_count"])
-        old_ok = _old_mp3_behavior(old_priv, old, src)
+        source_mp3 = Path(old["runtime_root"]) / case / "clip_00_30.mp3"
+        old_intact = bool(_regular_file(source_mp3, MAX_MEDIA)
+                          and _sha(source_mp3) == item["source_mp3_sha256"])
+        old_ok = _old_mp3_behavior(old_priv, old, src) if old_intact else None
         if audio_ok is None or old_ok is None:
             comparison = "INCOMPLETE"
         elif audio_ok and old_ok:
@@ -371,11 +380,7 @@ def score(truth: Path, session: str) -> dict:
             comparison = "MP3_ONLY_BEHAVIORAL_MATCH"
         else:
             comparison = "NEITHER_BEHAVIORAL_MATCH"
-        cases.append({"trial": case, "source_mp3_integrity": bool(
-            _regular_file(Path(old["runtime_root"]) / case / "clip_00_30.mp3",
-                          MAX_MEDIA) and _sha(
-              Path(old["runtime_root"]) / case / "clip_00_30.mp3") ==
-              item["source_mp3_sha256"]),
+        cases.append({"trial": case, "source_mp3_integrity": old_intact,
                       "mp4_integrity": intact,
                       "mp4_visual_code_match": visual_ok,
                       "mp4_audio_behavior_match": audio_ok,
