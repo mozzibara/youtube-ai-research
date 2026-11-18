@@ -41,6 +41,7 @@ ALLOW_EXACT = {
     "tools/inspect_agy_read_file_trace.py",
     "tools/agy_audio_transport_audit.py",
     "tools/agy_audio_capability_probe.py",
+    "tools/agy_mp4_audio_ab.py",
     "tools/agy_media_file_drop.ps1",
     "scripts/setup-agy-media.ps1",
     "scripts/run-agy-media.ps1",
