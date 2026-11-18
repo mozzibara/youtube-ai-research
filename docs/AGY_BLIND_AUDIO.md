@@ -667,3 +667,77 @@ even if its text mentions an MP3, MIME label, or transcription. A
 structured result without a matching call ID likewise cannot be
 promoted to verified byte transport. All independent ingress flags
 remain false. No new AGY invocation or prior trial replay is needed.
+
+
+## Evidence closure: archived 5-case CLI audio stream, 2026-11-18
+
+**Do not rerun the same five-case session for another variation of stream
+event adjacency analysis.** Offline inspection of session
+`blind-ecc67afd26534f13` is complete within the observable bounds of
+the archived `stream-json` output:
+
+| Observable | All five trials |
+| --- | --- |
+| MP3 filename in `read_file` parameters | observed |
+| `read_file` step update events | 2 per trial |
+| distinct `step_index` values for target | 1 per trial |
+| distinct argument envelopes | 1 per trial |
+| `tool_call_id` values available | none |
+| target path under an allowlisted strict field | none; unknown direct field |
+| `step.status` or `tool_info.status` | missing |
+| first four events after last target update | `AGENT_RESPONSE` steps; one terminal result |
+| explicitly typed tool-result candidate in selected window | none |
+| MP3 bytes SHA-256 matched to tool output | not evidenced |
+| authenticated provider model ingress receipt | not evidenced |
+
+Verdict: `CLI_TARGET_READ_STEP_OBSERVED_BINARY_DELIVERY_UNVERIFIED`.
+
+The two events are not two proven disk reads; they may be repeated step
+updates. The adjacent `AGENT_RESPONSE` steps and terminal response do
+not establish a tool response, much less a provider-side media receipt.
+The prior 3/3 speech transcription accuracy is behavioral evidence
+consistent with listening, but it does not independently authenticate
+which bytes entered the provider request. Failure to find binary bytes
+in this serialised stream is **not evidence that AGY failed to transmit
+them**. No existing score, file or private evidence should be changed.
+
+### Documentation and capability boundary
+
+The official Antigravity CLI changelog for **v1.1.18 (August 22, 2026)**
+notes recognized audio attachment formats including MP3, WAV, M4A,
+AAC, FLAC and OPUS:
+https://antigravity.google/docs/changelog?tab=cli
+
+However the official CLI prompting guide's clipboard-paste file-type
+list includes images and videos, not audio:
+https://antigravity.google/docs/cli/prompting
+
+The prior **Windows AGY 1.5.9** clipboard-file-drop experiment observed
+`No image or video found in the clipboard` for audio, even when the
+Windows file-drop clipboard registration succeeded.
+These facts are **not contradictory evidence of identical behavior**:
+format recognition, that particular clipboard-paste entry point, and
+model-side binary delivery are different claims.
+
+### Next engineering boundary — do not keep guessing stream-json schemas
+
+1. **No-cost capability gate**: identify a supported *native audio
+   attachment entry point* in the installed CLI build, rather than
+   assuming `@` path mentions or Windows `CF_HDROP` file drops are
+   native media attachments. A visible attachment chip is UI-only
+   evidence, not the final receipt.
+2. **Provider-request boundary**: a trusted pre-submit inspection or
+   authenticated provider receipt must demonstrate a typed `audio/*`
+   part, its byte count and a digest bound to the original MP3 (or
+   securely equivalent evidence). Existing headless `stream-json`
+   events and the model's own claims do not provide that proof.
+3. **Separated behavioral controls**: maintain blinded positive/silence
+   controls with nonce phrases and withheld truth as supportive *audio
+   use* evidence. They cannot replace the provider-request proof.
+   Alternative SDK/direct Gemini audio calls may test a distinct
+   transport path, but cannot certify that **AGY** transmitted bytes.
+
+No new model request, private media export, network interception,
+credential extraction, or replay is authorized by this decision record.
+Any future live test must be separately approved and must retain
+`--dangerously-skip-permissions` in AGY model invocations.
