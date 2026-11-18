@@ -336,6 +336,45 @@ static; the acoustic stimulus may be speech, tones, or silence and
 is intentionally blinded, so do not reveal or write observations into the model
 workspace. This validates local playback, **not** Gemini ingress.
 
+### Optional minimal 3-case blind plan from the already prepared session
+
+The Windows preparation succeeded for
+`compare-93b80c625dfd49ba`: all five MP4s passed H.264/AAC stream
+checks, decoded-soundtrack profile comparison, and original MP3 hash
+checks. This **does not** establish AGY attachment or Gemini ingress.
+
+Avoid re-running `prepare`; it would create another set of MP4s and
+visual codes. Instead use the existing immutable comparison session:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python -m tools.agy_mp4_audio_ab select-minimal `
+  --session compare-93b80c625dfd49ba
+```
+
+This command reads the private manifest and media hashes and outputs
+**three opaque case IDs only**. The selected set covers exactly one
+archived SPEECH, one TONE and one SILENCE condition, but deliberately
+does not tell the observer which is which. It does not invoke AGY,
+modify any experiment or print truth/nonce/visual code. The order is
+randomized and has no acoustic meaning.
+
+For an individual selected case, build its existing path locally:
+
+```powershell
+$comparison = "compare-93b80c625dfd49ba"
+$trial = "case-REPLACE-WITH-SELECTED-ID"
+$mp4 = Join-Path $env:LOCALAPPDATA "AGYVideoAB\runtime\$comparison\$trial\clip_00_30.mp4"
+Test-Path -LiteralPath $mp4 -PathType Leaf
+```
+
+Do **not** send all five requests initially. Verify one selected MP4's
+native TUI media chip first; only run the three selected blind cases
+if a model invocation is explicitly approved. Export the responses
+outside all model workspaces and use `import-response` and `score`
+for a separate, private, offline comparison. Remaining two cases are
+reserved for a follow-up only if the triad is inconclusive.
+
 ### 2. Use the previously successful MP4 chip route
 
 For each requested MP4 trial, start a **fresh interactive AGY
