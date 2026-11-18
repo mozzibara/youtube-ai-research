@@ -21,7 +21,7 @@ class AGYAudioCapabilityTests(unittest.TestCase):
         with patch.object(probe.shutil, "which", return_value="C:/Tools/agy.exe"), \
              patch.object(probe.subprocess, "run", side_effect=[
                  outcome("Antigravity CLI v1.5.9"),
-                 outcome("Usage: agy [options]\\n  -p --prompt  print\\n  --input-format text"),
+                 outcome("Usage: agy [options]\n  -p --prompt  print\n  --input-format text"),
              ]) as run:
             report = probe.probe_installed_cli()
         self.assertEqual(report["schema"], "agy_installed_audio_capability_v1")
@@ -54,7 +54,7 @@ class AGYAudioCapabilityTests(unittest.TestCase):
         with patch.object(probe.shutil, "which", return_value="/tmp/agy"), \
              patch.object(probe.subprocess, "run", side_effect=[
                  outcome("agy 1.5.9"),
-                 outcome("Usage: agy [flags]\\n  --audio-file <path> Attach MP3 audio"),
+                 outcome("Usage: agy [flags]\n  --audio-file <path> Attach MP3 audio"),
              ]):
             report = probe.probe_installed_cli()
         self.assertEqual(report["audio_attachment_flags"], ["--audio-file"])
@@ -67,9 +67,9 @@ class AGYAudioCapabilityTests(unittest.TestCase):
         with patch.object(probe.shutil, "which", return_value="/tmp/agy"), \
              patch.object(probe.subprocess, "run", side_effect=[
                  outcome("1.1.18"),
-                 outcome("Usage: agy --help\\n"
-                         "  --model MODEL   Audio capable model\\n"
-                         "  --input-format FORMAT stream-json, text\\n"
+                 outcome("Usage: agy --help\n"
+                         "  --model MODEL   Audio capable model\n"
+                         "  --input-format FORMAT stream-json, text\n"
                          "  --voice   live dictation"),
              ]):
             report = probe.probe_installed_cli()
@@ -114,7 +114,7 @@ class AGYAudioCapabilityTests(unittest.TestCase):
         private = "PRIVATE_API_TOKEN=SUPERSECRET"
         with patch.object(probe.shutil, "which", return_value="/tmp/agy"), \
              patch.object(probe.subprocess, "run", side_effect=[
-                 outcome(private), outcome("Usage: agy\\n --help"),
+                 outcome(private), outcome("Usage: agy\n --help"),
              ]):
             report = probe.probe_installed_cli()
         self.assertEqual(report["version_status"], "UNRECOGNIZED_VERSION")
@@ -140,7 +140,7 @@ class AGYAudioCapabilityTests(unittest.TestCase):
             with patch.object(probe.shutil, "which", return_value="/tmp/agy"), \
                  patch.object(probe.subprocess, "run", side_effect=[
                      outcome("Antigravity v1.5.9 user=/private/home"),
-                     outcome("Usage: agy\\n--audio-file <SECRET_TOKEN>"),
+                     outcome("Usage: agy\n--audio-file <SECRET_TOKEN>"),
                  ]):
                 report = probe.probe_installed_cli()
             self.assertEqual(secret.read_bytes(), before)
@@ -149,9 +149,9 @@ class AGYAudioCapabilityTests(unittest.TestCase):
 
     def test_help_flag_parser_rejects_words_in_body(self):
         flags = probe.find_audio_attachment_flags(
-            "Usage: agy --audio-file\\n"
-            "The string '--attach' is an example, not an option\\n"
-            "  --input-format text\\n"
+            "Usage: agy --audio-file\n"
+            "The string '--attach' is an example, not an option\n"
+            "  --input-format text\n"
             "  --attachment AUDIOFILE   file attachment")
         self.assertEqual(flags, ["--attachment"])
 
