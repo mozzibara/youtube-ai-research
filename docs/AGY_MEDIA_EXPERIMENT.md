@@ -33,6 +33,27 @@ $run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -Submit
 ```
 
+### Scope of the AGY audio attachment support claim
+
+As documented in the official Antigravity CLI v1.1.18 changelog
+(2026-08-22), the CLI recognizes common audio attachment formats such as
+`.mp3`, `.wav`, `.m4a`, `.aac`, `.flac` and `.opus`:
+https://antigravity.google/docs/changelog?tab=cli
+
+The official CLI prompt guide's **clipboard** media section, however,
+currently lists images and videos, not audio:
+https://antigravity.google/docs/cli/prompting
+
+Therefore **audio format recognition must not be mistaken for support
+of the tested Windows `CF_HDROP` + Alt+V clipboard transport**. The
+existing audio clipboard failure remains valid for that specific local
+transport and test; it is not a general proof that no AGY audio
+attachment entry point exists. A future native-path experiment must
+verify an independently supported entry point first, keep media inside
+private runtime, and never submit an AGY model call before explicit
+authorization. See `docs/AGY_BLIND_AUDIO.md` for the five-case archive
+closure and why `stream-json` is not a binary receipt.
+
 ### Critical finding: audio clipboard paste is not supported by this CLI path
 
 Observed on Windows AGY CLI 1.5.9: both WAV and MP3 passed the local
