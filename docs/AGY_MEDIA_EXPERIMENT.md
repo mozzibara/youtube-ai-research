@@ -420,3 +420,25 @@ request MIME/bytes/digest**.
 No file is committed to the Public repository; no existing experiment
 is overwritten; this phase does not automatically execute or authorize
 a model call.
+
+### Related upstream protocol failure mode (hypothesis, not AGY proof)
+
+The separate **Google Gemini CLI** repository has documented issues
+where a `read_file` result carrying `audio/mpeg` or `video/mp4`
+was rejected by `function_response.parts`:
+https://github.com/google-gemini/gemini-cli/issues/16741
+https://github.com/google-gemini/gemini-cli/issues/25214
+
+Its current `convertToFunctionResponse` implementation explicitly
+filters audio/video inline parts and uses a separate deferred binary
+injection path for `read_file` and `read_many_files`:
+https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/generateContentResponseUtilities.ts
+
+**This is a protocol-level comparison hypothesis, not an observed AGY
+failure.** A matching `read_file` call in AGY's `stream-json` log
+neither proves nor disproves deferred payload insertion. Conversely,
+a native MP4 chip can represent the video attachment without ensuring
+its contained audio track was forwarded or processed. The matching
+blind MP4(AAC)/MP3 experiment above distinguishes observable behavior,
+not the internal provider request. Do not infer that the two different
+CLIs share code or identical transport mechanics.
