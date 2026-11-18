@@ -479,3 +479,265 @@ or imply zero error in real-world news transcription.
   Actual speech synthesis and headless AGY response must be checked on Windows.
 - AGY headless `stream-json` includes tool activity; unknown protocol
   variants fail closed rather than invent success.
+
+## Offline MP3 byte visibility audit (separate from acoustic scoring)
+
+Run this new command on **already archived** session data. It is read-only
+and makes **zero AGY/model calls**. Do not repeat `evaluate`, `recover`,
+or completed trials merely to conduct this audit.
+
+```powershell
+$session = "blind-ecc67afd26534f13"
+python .\tools\agy_audio_transport_audit.py --session $session
+```
+
+The default private root is
+`%LOCALAPPDATA%\AGYBlindAudio\truth`. To use a different private root,
+supply `--private-root` pointing to the **truth root**, not its session
+subdirectory. The reporter reads the original manifest and per-trial
+`*.ndjson` streams without storing, changing, or emitting audio content,
+ground truth, model transcripts, original paths, or credential values.
+
+The meter accepts two carefully scoped sources of CLI tool-result bytes:
+(1) an audio MIME + base64 payload nested under `tool_info.result/output/response`
+for the **target** `read_file` event; or (2) a separately typed `TOOL`
+result whose `tool_call_id` matches that target event. Adjacent generic
+messages, model-authored JSON, tool-call arguments, filenames, MIME hints,
+and arbitrary transcript text **never** count as byte transport evidence.
+A matched payload must decode to the **exact** locally archived MP3 bytes,
+with the original private manifest's SHA-256 also matching the source file.
+
+Interpret `assessment` as follows:
+
+- `MATCHED_CLI_TOOL_RESULT_BYTES`: exact source MP3 bytes appeared in
+  a correlated, structured AGY CLI tool result. This is a **CLI-stream
+  byte match**, *not* independently proven model ingestion.
+- `TARGET_READ_CALL_SHAPE_UNSUPPORTED`: the established blind evaluator
+  observed the target MP3 read call, but the stricter byte-audit parser could
+  not correlate its parameter envelope. This is a **protocol/parser
+  compatibility gap**, not evidence that no read occurred. The audit reports
+  `legacy_provenance_only=true` and never promotes an uncorrelated audio
+  payload to a byte match.
+- `NO_TARGET_READ_CALL`: neither the strict parser nor the existing
+  evaluator observed a target read call in the available typed stream;
+  it does not prove one never occurred in AGY internals.
+- `NO_TOOL_RESULT_AUDIO_BYTES`: an MP3 read call occurred, but the stream
+  exposed no verifiable inline audio bytes. This is **inconclusive**, not
+  evidence that the model did not receive audio.
+- `CLI_TOOL_RESULT_BYTES_MISMATCH`: at least one decoded audio payload
+  differed from the MP3. Transcoding, a different tool artifact, or faulty
+  source correlation must be investigated without rewriting the archive.
+- `INVALID_TOOL_RESULT_ENCODING`, `INCOMPLETE_TRACE`,
+  `UNSAFE_TRACE`, `MEDIA_HASH_MISMATCH`, or `TRACE_MISSING`:
+  the available artifacts cannot support an affirmative byte match.
+
+Both `model_ingress_verified` and
+`independent_binary_transport_verified` deliberately remain
+`false` for **every** possible CLI-only audit outcome. This avoids
+confusing local tool-result visibility with an authenticated trace at
+the provider's multimodal request boundary. Confirming provider/model
+ingress requires a separately trusted observation of the actual request
+media payload (or an authenticated provider-side receipt); neither is
+available merely from `stream-json`. The tool neither intercepts TLS
+credentials nor changes the user's AGY permissions.
+
+CI uses fabricated MP3-like bytes and synthetic tool event fixtures only.
+Real private audio is never published to Git or GitHub Actions.
+
+
+### Redacted event-envelope probe after unsupported target-read shapes
+
+The archived full 3+1+1 session `blind-ecc67afd26534f13` returned
+`TARGET_READ_CALL_SHAPE_UNSUPPORTED` for five cases under the newer
+byte-level parser. The earlier blind evaluator had already observed five
+target `read_file` calls. **This is a parser-compatibility gap, not five
+new failures to read audio**; it neither confirms nor denies MP3 delivery.
+
+Run the new *different* offline shape probe once; there is no reason to
+re-run `evaluate`, `diagnose-response`, `recover`, or the AGY model:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-shape
+```
+
+The probe reads only existing `*.ndjson` metadata and emits a fixed,
+privacy-safe vocabulary: parameter envelope type, allowlisted known
+parameter **key names**, count of unknown top-level keys, known tool-name
+location, and whether known tool result envelope keys exist. It **never**
+prints unknown dictionary keys, parameter values, paths, audio data,
+transcripts, credentials, prompt content or model answers. It never
+downloads data, invokes AGY, or modifies archived evidence.
+
+A `UNSCOPED_LEGACY_REFERENCE` is specifically not a trusted audio byte
+receipt: the old inspector found the target string somewhere in serialized
+parameters, while the newer strict parser needs an explicit typed input
+path. Use the shape-probe output to design a constrained parser for the
+actually observed AGY schema, with synthetic red/green fixtures. Do not
+accept an arbitrary nested string match as proof of audio transfer or
+silently turn the known five trials into a `PASS`.
+
+
+### Offline lifecycle inspection after 2 read_file events per case
+
+The archived `blind-ecc67afd26534f13` session had **two**
+`read_file` step-update events in each of five cases, an object-shaped
+parameter envelope with two unrecognized keys, and no inline
+`tool_info.result/output/response` fields. These findings are already
+recorded and must not be re-collected merely to repeat the same checks.
+
+To determine if the two *events* share a step index or call identifier,
+and what typed events directly follow the read calls, run this **new**
+offline inspection once:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-lifecycle
+```
+
+This produces only allowlisted categories and numeric counts:
+`target_tool_event_count`, `distinct_step_index_count`,
+`repeated_step_index_groups`, `distinct_call_id_count`,
+`missing_call_id_event_count`, `distinct_argument_envelope_count`,
+`repeat_update_possible`, `tool_step_statuses`,
+`same_step_status_change_observed`, `target_reference_location`,
+`post_target_event_types`, and `correlation_level`.
+Raw step IDs, tool call IDs, argument key names/values, reference paths,
+transcripts, decoded media bytes, or model output are never printed.
+
+- Two step events with the **same step index or tool call ID** may be
+  repeated progress updates of **one** actual read; the report never
+  claims they prove two separate reads.
+- A target reference in an unknown field is classified as
+  `DIRECT_VALUE`, `NESTED_VALUE`, or `KEY_ONLY`, without exposing
+  its key name or promoting it to an approved file-path binding.
+- A following `GENERIC` or terminal event yields
+  `ADJACENCY_ONLY`: mere adjacency is **not a tool receipt**.
+  `EXPLICIT_TOOL_CALL_ID` requires an allowlisted TOOL-source result
+  and a matching ID, but still does **not** prove model ingress.
+- `verified_distinct_file_reads`, `model_ingress_verified`, and
+  `independent_binary_transport_verified` remain `false` in all
+  CLI-only lifecycle reports.
+
+The command does not modify private files or invoke AGY. Its purpose
+is to identify whether a narrow, evidence-backed follow-up parser is
+possible. Avoid adding speculative aliases or treating untrusted
+tool-call argument text as proof of MP3 byte delivery.
+
+
+### Single next check: typed return envelope after deduplicated read_file events
+
+For the archived session `blind-ecc67afd26534f13`, the five trials each
+already have exactly **two AGY stream events referencing the MP3 under
+one step index**. No tool call ID or explicit tool-result correlation
+was found, and the recorded step status was an unknown/missing value.
+This establishes *one distinct observed tool step per trial*, not two
+independent audio reads and not confirmed transport to Gemini.
+
+The new `--inspect-return-envelope` mode examines **only the first four
+event records after the last target read_file step update**. It reveals
+fixed-label envelopes and scalar *types*, never actual contents.
+It is intentionally narrower than another session evaluation:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_transport_audit.py --session blind-ecc67afd26534f13 --inspect-return-envelope
+```
+
+It prints `target_status_slots` (presence/type at the existing known
+`step.status` and `tool_info.status` paths),
+`target_known_status_labels` (only enumerated values),
+and `adjacent_envelopes` with an allowlisted event kind, step subtype,
+content type, source label and selected standard **field names**. Unknown
+keys/values, paths, model text, media, and any tokens remain private.
+
+Interpret `return_assessment` conservatively:
+
+- `ADJACENT_UNTYPED_EVENTS_ONLY`: surrounding events exist, but no typed
+  `TOOL`-source result is evidenced in the selected window.
+- `UNLINKED_TYPED_RESULT_CANDIDATE`: a typed result candidate was
+  observed, **not** proven to belong to the target read call, and not
+  proven to contain MP3 audio or reach Gemini.
+- `NO_POST_TARGET_EVENT`, `NO_TARGET_EVENT`,
+  `INCOMPLETE_TRACE`, `TRACE_MISSING`, or `UNSAFE_TRACE`
+  are inconclusive for the audio delivery question.
+
+A model-generated terminal `result.response` is **not** a tool return,
+even if its text mentions an MP3, MIME label, or transcription. A
+structured result without a matching call ID likewise cannot be
+promoted to verified byte transport. All independent ingress flags
+remain false. No new AGY invocation or prior trial replay is needed.
+
+
+## Evidence closure: archived 5-case CLI audio stream, 2026-11-18
+
+**Do not rerun the same five-case session for another variation of stream
+event adjacency analysis.** Offline inspection of session
+`blind-ecc67afd26534f13` is complete within the observable bounds of
+the archived `stream-json` output:
+
+| Observable | All five trials |
+| --- | --- |
+| MP3 filename in `read_file` parameters | observed |
+| `read_file` step update events | 2 per trial |
+| distinct `step_index` values for target | 1 per trial |
+| distinct argument envelopes | 1 per trial |
+| `tool_call_id` values available | none |
+| target path under an allowlisted strict field | none; unknown direct field |
+| `step.status` or `tool_info.status` | missing |
+| first four events after last target update | `AGENT_RESPONSE` steps; one terminal result |
+| explicitly typed tool-result candidate in selected window | none |
+| MP3 bytes SHA-256 matched to tool output | not evidenced |
+| authenticated provider model ingress receipt | not evidenced |
+
+Verdict: `CLI_TARGET_READ_STEP_OBSERVED_BINARY_DELIVERY_UNVERIFIED`.
+
+The two events are not two proven disk reads; they may be repeated step
+updates. The adjacent `AGENT_RESPONSE` steps and terminal response do
+not establish a tool response, much less a provider-side media receipt.
+The prior 3/3 speech transcription accuracy is behavioral evidence
+consistent with listening, but it does not independently authenticate
+which bytes entered the provider request. Failure to find binary bytes
+in this serialised stream is **not evidence that AGY failed to transmit
+them**. No existing score, file or private evidence should be changed.
+
+### Documentation and capability boundary
+
+The official Antigravity CLI changelog for **v1.1.18 (August 22, 2026)**
+notes recognized audio attachment formats including MP3, WAV, M4A,
+AAC, FLAC and OPUS:
+https://antigravity.google/docs/changelog?tab=cli
+
+However the official CLI prompting guide's clipboard-paste file-type
+list includes images and videos, not audio:
+https://antigravity.google/docs/cli/prompting
+
+The prior **Windows AGY 1.5.9** clipboard-file-drop experiment observed
+`No image or video found in the clipboard` for audio, even when the
+Windows file-drop clipboard registration succeeded.
+These facts are **not contradictory evidence of identical behavior**:
+format recognition, that particular clipboard-paste entry point, and
+model-side binary delivery are different claims.
+
+### Next engineering boundary — do not keep guessing stream-json schemas
+
+1. **No-cost capability gate**: identify a supported *native audio
+   attachment entry point* in the installed CLI build, rather than
+   assuming `@` path mentions or Windows `CF_HDROP` file drops are
+   native media attachments. A visible attachment chip is UI-only
+   evidence, not the final receipt.
+2. **Provider-request boundary**: a trusted pre-submit inspection or
+   authenticated provider receipt must demonstrate a typed `audio/*`
+   part, its byte count and a digest bound to the original MP3 (or
+   securely equivalent evidence). Existing headless `stream-json`
+   events and the model's own claims do not provide that proof.
+3. **Separated behavioral controls**: maintain blinded positive/silence
+   controls with nonce phrases and withheld truth as supportive *audio
+   use* evidence. They cannot replace the provider-request proof.
+   Alternative SDK/direct Gemini audio calls may test a distinct
+   transport path, but cannot certify that **AGY** transmitted bytes.
+
+No new model request, private media export, network interception,
+credential extraction, or replay is authorized by this decision record.
+Any future live test must be separately approved and must retain
+`--dangerously-skip-permissions` in AGY model invocations.
