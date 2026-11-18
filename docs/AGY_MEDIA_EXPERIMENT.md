@@ -277,3 +277,146 @@ record**, not proof the result contained playable MP3, that binary bytes were
 provided as model audio input, or that resulting transcription matches
 the original audio. Preserve `independent_audio_receipt_verified=false`
 until controlled, audio-grounded testing supports a stronger assertion.
+
+
+## Matched MP4/AAC versus archived MP3 read_file — separate native video and audio behavior
+
+**Observation before new testing:** A native MP4 TUI media chip was already
+observed, but the model previously reported no access to the video's
+audio track. In a different path, five archived headless MP3 trials
+showed one `read_file` tool step each with repeated event updates.
+No matched MP3 bytes were observed in a tool-result payload.
+`AGENT_RESPONSE` after `read_file` was not a linked tool return.
+Neither record is provider-side audio ingress proof.
+
+The offline, no-model comparison tool `tools/agy_mp4_audio_ab.py`
+**reuses the existing 5 MP3 blind cases and their withheld answers**.
+It does not repeat the old MP3 model calls or alter their private
+files. For each existing 30-second MP3 it generates exactly one new
+MP4 with a static six-digit visual nonce and the **same audio content
+transcoded to AAC**:
+
+- Video: 640×360 H.264/yuv420p, 1 frame/s, with a visual-only
+  six-digit code unrelated to the acoustic nonce.
+- Audio: mono 16 kHz AAC transcoded from the original MP3 via FFmpeg;
+  both streams and 30-second duration are checked with FFprobe.
+- Integrity: original MP3 SHA-256 is matched to the archived private
+  manifest, the new MP4 SHA-256 is recorded privately, and FFmpeg
+  decoded audio energy envelopes are compared, allowing encoder delay.
+  MP3 and AAC compressed bytes are **not expected to have equal hashes**.
+- Privacy: new model workspace holds **only** `clip_00_30.mp4`, not
+  the original MP3, answer manifest, acoustic class, visual nonce text,
+  old transcript, or JSON3. Private answers and receipts are in a
+  separate directory outside the Git repository.
+- The tool **never** invokes AGY or any provider model. The only
+  subprocesses it can start are local FFmpeg/FFprobe in `prepare`.
+
+### 1. Prepare five MP4 counterparts without model calls
+
+From the existing Public development branch in PowerShell:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+
+python -m tools.agy_mp4_audio_ab prepare \
+  --source-session blind-ecc67afd26534f13
+```
+
+The result prints a new `compare-...` session ID and an MP4 file path
+for each `case-...`. **No answer key or acoustic class is printed.**
+Preparation creates files only under
+`%LOCALAPPDATA%\AGYVideoAB\runtime` and
+`%LOCALAPPDATA%\AGYVideoAB\truth`, leaving the original
+`%LOCALAPPDATA%\AGYBlindAudio` evidence untouched.
+
+**Local preflight before any new model request:** Choose one of the
+generated MP4s, play it locally and confirm that both moving/static
+video frames and the audio track are decodable. The visual code is
+static; the spoken content, tones, or silence are intentionally
+blinded, so do not reveal or write observations into the model
+workspace. This validates local playback, **not** Gemini ingress.
+
+### 2. Use the previously successful MP4 chip route
+
+For each requested MP4 trial, start a **fresh interactive AGY
+conversation** in that trial's isolated workspace. Save the Public repo
+root before changing directories and use the known Windows clipboard
+file-drop helper to register the selected MP4:
+
+```powershell
+$repo = "C:\kmj-ai-agent\YouTube-AI-Research-Public"
+$mp4 = "<a new MP4 file path from step 1>"
+$work = Split-Path -Parent $mp4
+
+powershell.exe -NoProfile -STA -File "$repo\tools\agy_media_file_drop.ps1" -FilePath $mp4
+Set-Location -LiteralPath $work
+
+agy --model gemini-3.8-flash-medium --effort medium --dangerously-skip-permissions --sandbox
+```
+
+In the TUI, attach the file using the previously successful **media
+paste gesture** and confirm that an **MP4 media chip**, not just the
+path text, appears. Then paste the following answer-key-free prompt
+generated outside the TUI:
+
+```powershell
+python -m tools.agy_mp4_audio_ab prompt
+```
+
+Run the `prompt` command from the Git checkout, not inside the isolated
+media directory. Paste its **text**, inspect that the MP4 chip remains
+attached, and **only then deliberately press Enter** if a live Gemini
+request is authorized. The CLI argument
+`--dangerously-skip-permissions` bypasses approval prompts; use only
+the isolated, otherwise empty media workspace.
+
+Do not tell the model the answer key, the old MP3 transcript, which
+trial is speech/tone/silence, or the local truth directory. The prompt
+asks independently for `visual_code` and `acoustic_class`, plus
+speech segments or tone count, in a JSON object. A correct *visual*
+code without correct audio behavior is evidence that visual and audio
+access can diverge. No fresh MP3 requests are required.
+
+### 3. Import model JSON outside the workspace; score offline
+
+Save each **raw JSON model reply** to a private file **outside** the
+model workspace and outside the Git checkout. It must match the
+prompt's schema (the helper refuses malformed input and overwrites).
+
+```powershell
+python -m tools.agy_mp4_audio_ab import-response \
+  --session compare-<session-id> \
+  --trial case-<case-id> \
+  --file "<private JSON response file>"
+
+python -m tools.agy_mp4_audio_ab score \
+  --session compare-<session-id>
+```
+
+`score` checks the MP4 visual nonce, acoustic category and hidden
+Korean speech nonce/CER or tone count against **existing private
+ground truth**. It also checks the archived MP3 answer from the
+original session without rerunning its model or modifying old evidence.
+Only fixed categories and booleans are printed:
+
+- `BOTH_BEHAVIORAL_MATCH`: both routes recognized their respective
+  blind acoustic target (not proof of byte transport).
+- `MP4_ONLY_BEHAVIORAL_MATCH`: MP4 passed; prior MP3 did not.
+- `MP3_ONLY_BEHAVIORAL_MATCH`: prior MP3 passed; MP4 did not.
+- `NEITHER_BEHAVIORAL_MATCH`: neither passed the strict acoustic
+  behavior contract.
+- `INCOMPLETE`: a response or other necessary evidence is missing.
+
+An MP4 visual-code match plus acoustic mismatch helps isolate a possible
+**audio-track ingestion** fault after visual attachment; a correct
+acoustic response from MP4 but not MP3 suggests the file-reading
+tool route is inadequate. `score` does not verify whether the AGY
+model used a native attachment rather than a tool; the human operator
+must confirm the chip and inspect the session. If either model could
+access the hidden truth from outside the isolated workspace, the
+behavioral result is invalid. **Neither behavior proves provider
+request MIME/bytes/digest**.
+
+No file is committed to the Public repository; no existing experiment
+is overwritten; this phase does not automatically execute or authorize
+a model call.
