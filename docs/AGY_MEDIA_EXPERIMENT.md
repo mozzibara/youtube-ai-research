@@ -33,6 +33,54 @@ $run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -Submit
 ```
 
+### Inspect the actual installed AGY CLI without a model request
+
+The public source now includes an independent local capability probe.
+Run **only** the following commands in the existing Python venv / Public checkout:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_capability_probe.py
+```
+
+The probe locates the first `agy` executable in `PATH` and runs
+**only** `agy --version` and `agy --help`, each with an eight-second
+timeout and stdin closed, in a disposable working directory. It sets
+`AGY_CLI_DISABLE_AUTO_UPDATE=true`, never uses `-p`, launches an
+interactive conversation, sends media, or requests any model inference.
+It does not read AGY credentials, configuration, cached transcripts or
+private experiments. Because it starts the CLI binary, its own internal
+startup telemetry cannot be absolutely ruled out; model request
+submission is not part of this probe's commands.
+
+The JSON report contains only a parsed semantic version, fixed-status
+labels and **allowlisted** option names; it does not include raw stdout,
+stderr, local executable paths, environment variable values or user
+files. `audio_attachment_flags` records only explicitly declared options
+(e.g. `--audio-file`); a word like "audio" in explanatory text or an
+unrelated `--input-format` option cannot constitute an attachment flag.
+
+Interpretation of `assessment`:
+
+- `DOCUMENTED_AUDIO_FORMAT_EXPECTED_ENTRYPOINT_UNVERIFIED` means the
+  installed version is at/above the published v1.1.18 format-recognition
+  change, but CLI help did **not** establish a native audio entry point.
+- `AUDIO_NAMED_FLAG_CANDIDATE_ATTACHMENT_NOT_VERIFIED` indicates a
+  recognized audio-named flag is shown in the installed help; it does
+  not confirm MP3 attachment, payload or provider receipt.
+- `OLDER_BUILD_AUDIO_SUPPORT_UNKNOWN` is a version older than the
+  documented audio-recognition note; it is **not** a proven lack of
+  audio capability.
+- `HELP_NOT_AVAILABLE_ATTACHMENT_UNKNOWN`,
+  `VERSION_UNKNOWN_ATTACHMENT_UNVERIFIED`,
+  `INSTALLED_CLI_UNAVAILABLE` or `UNSUPPORTED_CLI_LAUNCHER` leave
+  capability unknown and must not trigger an automatic update.
+
+Do not run `agy update`, `agy -p`, a TUI media paste, or a new MP3
+trial as part of this offline capability gate. Future **model invocations**
+must separately be authorized and include
+`--dangerously-skip-permissions` as established for AGY requests.
+
 ### Scope of the AGY audio attachment support claim
 
 As documented in the official Antigravity CLI v1.1.18 changelog
