@@ -395,6 +395,58 @@ def score(truth: Path, session: str) -> dict:
                      "request receipts; codec transcode MP3-to-AAC is lossy.")}
 
 
+
+def select_minimal(truth: Path, session: str) -> dict:
+    """Pick one blinded MP4 for each existing acoustic class, read-only.
+
+    Only opaque trial identifiers are disclosed; the selected classes,
+    nonce, transcripts, private source paths and answer key stay withheld.
+    A separate observer can run each trial without knowing its class.
+    """
+    _, comparison = _load(truth, session)
+    _, source = _read_manifest(
+        Path(comparison["source_truth_root"]), comparison["source_session"])
+    originals = {item["id"]: item for item in source["cases"]}
+    by_kind: dict[str, list[str]] = {"speech": [], "tone": [], "silence": []}
+    root = Path(comparison["runtime_root"]).resolve()
+    for case in comparison["cases"]:
+        identifier = case["id"]
+        if not CASE_RE.fullmatch(identifier) or identifier not in originals:
+            raise ValueError("Unknown or invalid comparison case")
+        old = originals[identifier]
+        mp4 = root / identifier / "clip_00_30.mp4"
+        source_mp3 = Path(source["runtime_root"]) / identifier / "clip_00_30.mp3"
+        if (not _regular_file(mp4, MAX_MEDIA)
+                or not _regular_file(source_mp3, MAX_MEDIA)
+                or mp4.is_symlink() or source_mp3.is_symlink()
+                or _sha(mp4) != case["mp4_sha256"]
+                or _sha(source_mp3) != case["source_mp3_sha256"]
+                or _sha(source_mp3) != old["sha256"]):
+            raise ValueError("Media integrity check failed")
+        kind = old.get("kind")
+        if kind not in by_kind:
+            raise ValueError("Unsupported acoustic control")
+        by_kind[kind].append(identifier)
+    if any(not items for items in by_kind.values()):
+        raise ValueError("Comparison session must have all three acoustic controls")
+    chosen = [secrets.choice(by_kind[k]) for k in ("speech", "tone", "silence")]
+    secrets.SystemRandom().shuffle(chosen)
+    return {
+        "schema": "agy_mp4_minimal_blind_plan_v1",
+        "session": session,
+        "selected_trials": chosen,
+        "selected_count": len(chosen),
+        "model_called": False,
+        "private_evidence_modified": False,
+        "answer_keys_disclosed": False,
+        "native_attachment_verified": False,
+        "provider_audio_ingress_verified": False,
+        "note": ("The three trials cover the original speech/tone/silence "
+                 "conditions in a randomized order. Condition assignment "
+                 "is deliberately withheld; do not reveal it to AGY."),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline MP4/AAC vs archived MP3 audio controls; never calls AGY")
@@ -412,6 +464,11 @@ def main(argv: list[str] | None = None) -> int:
     s = subs.add_parser("score")
     s.add_argument("--session", required=True)
     s.add_argument("--truth", type=Path)
+    m = subs.add_parser(
+        "select-minimal",
+        help="Choose one of each hidden acoustic class, no model calls")
+    m.add_argument("--session", required=True)
+    m.add_argument("--truth", type=Path)
     subs.add_parser("prompt")
     args = parser.parse_args(argv)
     if args.action == "prompt":
@@ -426,6 +483,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "import-response":
             report = import_response(args.truth or _default("AGYVideoAB/truth"),
                                      args.session, args.trial, args.file)
+        elif args.action == "select-minimal":
+            report = select_minimal(
+                args.truth or _default("AGYVideoAB/truth"), args.session)
         else:
             report = score(args.truth or _default("AGYVideoAB/truth"), args.session)
     except (OSError, ValueError, subprocess.SubprocessError, KeyError,
