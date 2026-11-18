@@ -318,7 +318,7 @@ From the existing Public development branch in PowerShell:
 ```powershell
 git pull --ff-only origin feature/agy-audio-byte-receipt-audit
 
-python -m tools.agy_mp4_audio_ab prepare \
+python -m tools.agy_mp4_audio_ab prepare `
   --source-session blind-ecc67afd26534f13
 ```
 
@@ -332,8 +332,8 @@ Preparation creates files only under
 **Local preflight before any new model request:** Choose one of the
 generated MP4s, play it locally and confirm that both moving/static
 video frames and the audio track are decodable. The visual code is
-static; the spoken content, tones, or silence are intentionally
-blinded, so do not reveal or write observations into the model
+static; the acoustic stimulus may be speech, tones, or silence and
+is intentionally blinded, so do not reveal or write observations into the model
 workspace. This validates local playback, **not** Gemini ingress.
 
 ### 2. Use the previously successful MP4 chip route
@@ -344,7 +344,7 @@ root before changing directories and use the known Windows clipboard
 file-drop helper to register the selected MP4:
 
 ```powershell
-$repo = "C:\kmj-ai-agent\YouTube-AI-Research-Public"
+$repo = (Get-Location).Path
 $mp4 = "<a new MP4 file path from step 1>"
 $work = Split-Path -Parent $mp4
 
@@ -384,12 +384,12 @@ model workspace and outside the Git checkout. It must match the
 prompt's schema (the helper refuses malformed input and overwrites).
 
 ```powershell
-python -m tools.agy_mp4_audio_ab import-response \
-  --session compare-<session-id> \
-  --trial case-<case-id> \
+python -m tools.agy_mp4_audio_ab import-response `
+  --session compare-<session-id> `
+  --trial case-<case-id> `
   --file "<private JSON response file>"
 
-python -m tools.agy_mp4_audio_ab score \
+python -m tools.agy_mp4_audio_ab score `
   --session compare-<session-id>
 ```
 
