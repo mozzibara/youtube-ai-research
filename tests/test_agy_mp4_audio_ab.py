@@ -192,6 +192,64 @@ class MP4ABTests(unittest.TestCase):
             "segments": [], "beep_count": None}))["acoustic_class"],
             "UNAVAILABLE")
 
+    def test_blind_minimal_selection_covers_three_conditions_without_keys(self):
+        prepared = self._prepare()
+        compare_id = prepared["session"]
+        priv = self.new_truth / compare_id
+        source_path = self.old_truth / self.source_session / "manifest.json"
+        source = json.loads(source_path.read_text(encoding="utf-8"))
+        comparison_path = priv / "manifest.json"
+        comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+        for suffix, kind in (("abcdef012345", "silence"), ("234567abcdef", "tone")):
+            case = "case-" + suffix
+            folder = self.old_runtime / self.source_session / case
+            folder.mkdir(parents=True)
+            mp3 = folder / "clip_00_30.mp3"
+            mp3.write_bytes(("synthetic-" + kind).encode("ascii"))
+            mp4 = self.new_runtime / compare_id / case / "clip_00_30.mp4"
+            mp4.parent.mkdir()
+            mp4.write_bytes(("synthetic-mp4-" + kind).encode("ascii"))
+            original_hash = hashlib.sha256(mp3.read_bytes()).hexdigest()
+            source["cases"].append({
+                "id": case, "sha256": original_hash, "kind": kind,
+                "reference": "", "nonce": "", "beep_count": 2 if kind == "tone" else 0,
+            })
+            comparison["cases"].append({
+                "id": case, "source_mp3_sha256": original_hash,
+                "mp4_sha256": hashlib.sha256(mp4.read_bytes()).hexdigest(),
+                "visual_code": "987654", "soundtrack_profile_verified": True,
+            })
+        source_path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
+        comparison_path.write_text(json.dumps(comparison, ensure_ascii=False),
+                                   encoding="utf-8")
+        with patch.object(ab.subprocess, "run",
+                          side_effect=AssertionError("No model or ffmpeg call")):
+            out = ab.select_minimal(self.new_truth, compare_id)
+        self.assertEqual(out["schema"], "agy_mp4_minimal_blind_plan_v1")
+        self.assertEqual(len(out["selected_trials"]), 3)
+        self.assertEqual(set(out["selected_trials"]), {
+            self.case, "case-abcdef012345", "case-234567abcdef"})
+        self.assertFalse(out["model_called"])
+        self.assertFalse(out["answer_keys_disclosed"])
+        self.assertFalse(out["private_evidence_modified"])
+        self.assertEqual(out["session"], compare_id)
+        dumped = json.dumps(out, ensure_ascii=False)
+        for forbidden in ("SPEECH", "TONE", "SILENCE",
+                          "파란 우산이", "987654", str(self.old_truth)):
+            self.assertNotIn(forbidden, dumped)
+
+    def test_minimal_selection_incomplete_conditions_fails_closed(self):
+        prepared = self._prepare()
+        with self.assertRaisesRegex(ValueError, "three"):
+            ab.select_minimal(self.new_truth, prepared["session"])
+
+    def test_minimal_selection_detects_tampered_mp4(self):
+        prepared = self._prepare()
+        mp4 = Path(prepared["runtime_root"]) / self.case / "clip_00_30.mp4"
+        mp4.write_bytes(b"changed")
+        with self.assertRaises(ValueError):
+            ab.select_minimal(self.new_truth, prepared["session"])
+
     def test_no_submit_option_or_model_launch_in_public_cli(self):
         self.assertNotIn("--submit", ab.PROMPT)
         self.assertNotIn("일이삼사오육", ab.PROMPT)
