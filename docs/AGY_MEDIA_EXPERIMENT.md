@@ -81,6 +81,47 @@ trial as part of this offline capability gate. Future **model invocations**
 must separately be authorized and include
 `--dangerously-skip-permissions` as established for AGY requests.
 
+### Installed Windows CLI capability inspection — observed result
+
+The user's local no-model diagnostic for **AGY CLI v1.5.10** returned:
+
+- `version_status=OK` and `help_status=OK`
+- `audio_attachment_flags=[]` and `help_audio_keyword_seen=false`
+- `assessment=DOCUMENTED_AUDIO_FORMAT_EXPECTED_ENTRYPOINT_UNVERIFIED`
+- `model_called=false`, `prompt_submitted=false`,
+  `native_audio_attachment_verified=false`,
+  `provider_audio_ingress_verified=false`
+
+**Determination:** Installed AGY CLI 1.5.10 is newer than the
+published v1.1.18 audio-format recognition change, but `--help`
+exposes **no audio-named attachment flag** and no audio keyword.
+These observations neither establish an audio attachment entrypoint
+nor refute audio support inside the interactive CLI. They do not
+invalidate the earlier Windows 1.5.9 audio clipboard failure, and
+they must not be converted into a successful model receipt.
+
+The official CLI reference enumerates `--print`, `--input-format`,
+`--sandbox`, etc., but does not describe a documented standalone
+`--audio-file` CLI flag:
+https://antigravity.google/docs/cli/reference/
+
+The latest CLI prompting guide describes clipboard media as **images
+and videos**, while the CLI release notes separately state support for
+recognizing MP3 and other audio formats. The **Antigravity IDE**
+changelog's file-picker / drag-and-drop audio support must not be
+treated as an independently verified AGY **CLI** input feature.
+
+The no-model `--version`/`--help` capability gate is now complete.
+Do not repeat it on the same binary without a version change.
+If native attachment verification is still required, the next
+evidence boundary is a **single operator-controlled, no-Enter TUI
+staging attempt** using disposable non-sensitive media in a temporary
+workspace. It must record only whether a typed audio attachment
+indicator appears, distinguish a media chip from plain inserted path
+text, and exit without submitting a prompt. No automated key
+presses, live AGY requests, private MP3 upload or provider-ingress
+claims are authorized by this record.
+
 ### Scope of the AGY audio attachment support claim
 
 As documented in the official Antigravity CLI v1.1.18 changelog
