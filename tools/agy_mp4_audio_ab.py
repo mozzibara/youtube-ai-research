@@ -396,17 +396,17 @@ def main(argv: list[str] | None = None) -> int:
     subs = parser.add_subparsers(dest="action", required=True)
     p = subs.add_parser("prepare")
     p.add_argument("--source-session", required=True)
-    p.add_argument("--source-truth", type=Path, default=_default("AGYBlindAudio/truth"))
-    p.add_argument("--runtime", type=Path, default=_default("AGYVideoAB/runtime"))
-    p.add_argument("--truth", type=Path, default=_default("AGYVideoAB/truth"))
+    p.add_argument("--source-truth", type=Path)
+    p.add_argument("--runtime", type=Path)
+    p.add_argument("--truth", type=Path)
     i = subs.add_parser("import-response")
     i.add_argument("--session", required=True)
     i.add_argument("--trial", required=True)
     i.add_argument("--file", required=True, type=Path)
-    i.add_argument("--truth", type=Path, default=_default("AGYVideoAB/truth"))
+    i.add_argument("--truth", type=Path)
     s = subs.add_parser("score")
     s.add_argument("--session", required=True)
-    s.add_argument("--truth", type=Path, default=_default("AGYVideoAB/truth"))
+    s.add_argument("--truth", type=Path)
     subs.add_parser("prompt")
     args = parser.parse_args(argv)
     if args.action == "prompt":
@@ -414,13 +414,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     try:
         if args.action == "prepare":
-            report = prepare(args.source_session, args.source_truth,
-                             args.runtime, args.truth)
+            report = prepare(args.source_session,
+                             args.source_truth or _default("AGYBlindAudio/truth"),
+                             args.runtime or _default("AGYVideoAB/runtime"),
+                             args.truth or _default("AGYVideoAB/truth"))
         elif args.action == "import-response":
-            report = import_response(args.truth, args.session, args.trial,
-                                     args.file)
+            report = import_response(args.truth or _default("AGYVideoAB/truth"),
+                                     args.session, args.trial, args.file)
         else:
-            report = score(args.truth, args.session)
+            report = score(args.truth or _default("AGYVideoAB/truth"), args.session)
     except (OSError, ValueError, subprocess.SubprocessError, KeyError,
             TypeError, ArithmeticError):
         print(json.dumps({"status": "PRIVATE_OFFLINE_COMPARISON_UNAVAILABLE",
