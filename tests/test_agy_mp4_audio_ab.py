@@ -160,6 +160,19 @@ class MP4ABTests(unittest.TestCase):
                 ab.prepare(self.source_session, self.old_truth,
                            self.new_runtime, self.new_truth)
 
+    def test_changed_source_audio_makes_prior_result_unknown(self):
+        prepared = self._prepare()
+        self.original.write_bytes(b"tampered after preparation")
+        trial = ab.score(self.new_truth, prepared["session"])["trials"][0]
+        self.assertFalse(trial["source_mp3_integrity"])
+        self.assertIsNone(trial["prior_mp3_audio_behavior_match"])
+        self.assertEqual(trial["comparison"], "INCOMPLETE")
+
+    def test_prepare_rejects_output_root_that_contains_original_runtime(self):
+        with self.assertRaises(ValueError):
+            ab.prepare(self.source_session, self.old_truth,
+                       self.old_runtime, self.new_truth)
+
     def test_model_output_cannot_be_imported_from_model_workspace(self):
         prepared = self._prepare()
         source = Path(prepared["runtime_root"]) / self.case / "result.json"
