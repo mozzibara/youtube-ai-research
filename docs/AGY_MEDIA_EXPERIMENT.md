@@ -33,6 +33,116 @@ $run = "D:\local-runtime\agy-experiments\sample-30s"
 .\scripts\run-agy-media.ps1 -Run $run -MediaType audio -Submit
 ```
 
+### Inspect the actual installed AGY CLI without a model request
+
+The public source now includes an independent local capability probe.
+Run **only** the following commands in the existing Python venv / Public checkout:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python .\tools\agy_audio_capability_probe.py
+```
+
+The probe locates the first `agy` executable in `PATH` and runs
+**only** `agy --version` and `agy --help`, each with an eight-second
+timeout and stdin closed, in a disposable working directory. It sets
+`AGY_CLI_DISABLE_AUTO_UPDATE=true`, never uses `-p`, launches an
+interactive conversation, sends media, or requests any model inference.
+It does not read AGY credentials, configuration, cached transcripts or
+private experiments. Because it starts the CLI binary, its own internal
+startup telemetry cannot be absolutely ruled out; model request
+submission is not part of this probe's commands.
+
+The JSON report contains only a parsed semantic version, fixed-status
+labels and **allowlisted** option names; it does not include raw stdout,
+stderr, local executable paths, environment variable values or user
+files. `audio_attachment_flags` records only explicitly declared options
+(e.g. `--audio-file`); a word like "audio" in explanatory text or an
+unrelated `--input-format` option cannot constitute an attachment flag.
+
+Interpretation of `assessment`:
+
+- `DOCUMENTED_AUDIO_FORMAT_EXPECTED_ENTRYPOINT_UNVERIFIED` means the
+  installed version is at/above the published v1.1.18 format-recognition
+  change, but CLI help did **not** establish a native audio entry point.
+- `AUDIO_NAMED_FLAG_CANDIDATE_ATTACHMENT_NOT_VERIFIED` indicates a
+  recognized audio-named flag is shown in the installed help; it does
+  not confirm MP3 attachment, payload or provider receipt.
+- `OLDER_BUILD_AUDIO_SUPPORT_UNKNOWN` is a version older than the
+  documented audio-recognition note; it is **not** a proven lack of
+  audio capability.
+- `HELP_NOT_AVAILABLE_ATTACHMENT_UNKNOWN`,
+  `VERSION_UNKNOWN_ATTACHMENT_UNVERIFIED`,
+  `INSTALLED_CLI_UNAVAILABLE` or `UNSUPPORTED_CLI_LAUNCHER` leave
+  capability unknown and must not trigger an automatic update.
+
+Do not run `agy update`, `agy -p`, a TUI media paste, or a new MP3
+trial as part of this offline capability gate. Future **model invocations**
+must separately be authorized and include
+`--dangerously-skip-permissions` as established for AGY requests.
+
+### Installed Windows CLI capability inspection — observed result
+
+The user's local no-model diagnostic for **AGY CLI v1.5.10** returned:
+
+- `version_status=OK` and `help_status=OK`
+- `audio_attachment_flags=[]` and `help_audio_keyword_seen=false`
+- `assessment=DOCUMENTED_AUDIO_FORMAT_EXPECTED_ENTRYPOINT_UNVERIFIED`
+- `model_called=false`, `prompt_submitted=false`,
+  `native_audio_attachment_verified=false`,
+  `provider_audio_ingress_verified=false`
+
+**Determination:** Installed AGY CLI 1.5.10 is newer than the
+published v1.1.18 audio-format recognition change, but `--help`
+exposes **no audio-named attachment flag** and no audio keyword.
+These observations neither establish an audio attachment entrypoint
+nor refute audio support inside the interactive CLI. They do not
+invalidate the earlier Windows 1.5.9 audio clipboard failure, and
+they must not be converted into a successful model receipt.
+
+The official CLI reference enumerates `--print`, `--input-format`,
+`--sandbox`, etc., but does not describe a documented standalone
+`--audio-file` CLI flag:
+https://antigravity.google/docs/cli/reference/
+
+The latest CLI prompting guide describes clipboard media as **images
+and videos**, while the CLI release notes separately state support for
+recognizing MP3 and other audio formats. The **Antigravity IDE**
+changelog's file-picker / drag-and-drop audio support must not be
+treated as an independently verified AGY **CLI** input feature.
+
+The no-model `--version`/`--help` capability gate is now complete.
+Do not repeat it on the same binary without a version change.
+If native attachment verification is still required, the next
+evidence boundary is a **single operator-controlled, no-Enter TUI
+staging attempt** using disposable non-sensitive media in a temporary
+workspace. It must record only whether a typed audio attachment
+indicator appears, distinguish a media chip from plain inserted path
+text, and exit without submitting a prompt. No automated key
+presses, live AGY requests, private MP3 upload or provider-ingress
+claims are authorized by this record.
+
+### Scope of the AGY audio attachment support claim
+
+As documented in the official Antigravity CLI v1.1.18 changelog
+(2026-08-22), the CLI recognizes common audio attachment formats such as
+`.mp3`, `.wav`, `.m4a`, `.aac`, `.flac` and `.opus`:
+https://antigravity.google/docs/changelog?tab=cli
+
+The official CLI prompt guide's **clipboard** media section, however,
+currently lists images and videos, not audio:
+https://antigravity.google/docs/cli/prompting
+
+Therefore **audio format recognition must not be mistaken for support
+of the tested Windows `CF_HDROP` + Alt+V clipboard transport**. The
+existing audio clipboard failure remains valid for that specific local
+transport and test; it is not a general proof that no AGY audio
+attachment entry point exists. A future native-path experiment must
+verify an independently supported entry point first, keep media inside
+private runtime, and never submit an AGY model call before explicit
+authorization. See `docs/AGY_BLIND_AUDIO.md` for the five-case archive
+closure and why `stream-json` is not a binary receipt.
+
 ### Critical finding: audio clipboard paste is not supported by this CLI path
 
 Observed on Windows AGY CLI 1.5.9: both WAV and MP3 passed the local
@@ -167,3 +277,207 @@ record**, not proof the result contained playable MP3, that binary bytes were
 provided as model audio input, or that resulting transcription matches
 the original audio. Preserve `independent_audio_receipt_verified=false`
 until controlled, audio-grounded testing supports a stronger assertion.
+
+
+## Matched MP4/AAC versus archived MP3 read_file — separate native video and audio behavior
+
+**Observation before new testing:** A native MP4 TUI media chip was already
+observed, but the model previously reported no access to the video's
+audio track. In a different path, five archived headless MP3 trials
+showed one `read_file` tool step each with repeated event updates.
+No matched MP3 bytes were observed in a tool-result payload.
+`AGENT_RESPONSE` after `read_file` was not a linked tool return.
+Neither record is provider-side audio ingress proof.
+
+The offline, no-model comparison tool `tools/agy_mp4_audio_ab.py`
+**reuses the existing 5 MP3 blind cases and their withheld answers**.
+It does not repeat the old MP3 model calls or alter their private
+files. For each existing 30-second MP3 it generates exactly one new
+MP4 with a static six-digit visual nonce and the **same audio content
+transcoded to AAC**:
+
+- Video: 640×360 H.264/yuv420p, 1 frame/s, with a visual-only
+  six-digit code unrelated to the acoustic nonce.
+- Audio: mono 16 kHz AAC transcoded from the original MP3 via FFmpeg;
+  both streams and 30-second duration are checked with FFprobe.
+- Integrity: original MP3 SHA-256 is matched to the archived private
+  manifest, the new MP4 SHA-256 is recorded privately, and FFmpeg
+  decoded audio energy envelopes are compared, allowing encoder delay.
+  MP3 and AAC compressed bytes are **not expected to have equal hashes**.
+- Privacy: new model workspace holds **only** `clip_00_30.mp4`, not
+  the original MP3, answer manifest, acoustic class, visual nonce text,
+  old transcript, or JSON3. Private answers and receipts are in a
+  separate directory outside the Git repository.
+- The tool **never** invokes AGY or any provider model. The only
+  subprocesses it can start are local FFmpeg/FFprobe in `prepare`.
+
+### 1. Prepare five MP4 counterparts without model calls
+
+From the existing Public development branch in PowerShell:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+
+python -m tools.agy_mp4_audio_ab prepare `
+  --source-session blind-ecc67afd26534f13
+```
+
+The result prints a new `compare-...` session ID and an MP4 file path
+for each `case-...`. **No answer key or acoustic class is printed.**
+Preparation creates files only under
+`%LOCALAPPDATA%\AGYVideoAB\runtime` and
+`%LOCALAPPDATA%\AGYVideoAB\truth`, leaving the original
+`%LOCALAPPDATA%\AGYBlindAudio` evidence untouched.
+
+**Local preflight before any new model request:** Choose one of the
+generated MP4s, play it locally and confirm that both moving/static
+video frames and the audio track are decodable. The visual code is
+static; the acoustic stimulus may be speech, tones, or silence and
+is intentionally blinded, so do not reveal or write observations into the model
+workspace. This validates local playback, **not** Gemini ingress.
+
+### Optional minimal 3-case blind plan from the already prepared session
+
+The Windows preparation succeeded for
+`compare-93b80c625dfd49ba`: all five MP4s passed H.264/AAC stream
+checks, decoded-soundtrack profile comparison, and original MP3 hash
+checks. This **does not** establish AGY attachment or Gemini ingress.
+
+Avoid re-running `prepare`; it would create another set of MP4s and
+visual codes. Instead use the existing immutable comparison session:
+
+```powershell
+git pull --ff-only origin feature/agy-audio-byte-receipt-audit
+python -m tools.agy_mp4_audio_ab select-minimal `
+  --session compare-93b80c625dfd49ba
+```
+
+This command reads the private manifest and media hashes and outputs
+**three opaque case IDs only**. The selected set covers exactly one
+archived SPEECH, one TONE and one SILENCE condition, but deliberately
+does not tell the observer which is which. It does not invoke AGY,
+modify any experiment or print truth/nonce/visual code. The order is
+randomized and has no acoustic meaning.
+
+For an individual selected case, build its existing path locally:
+
+```powershell
+$comparison = "compare-93b80c625dfd49ba"
+$trial = "case-REPLACE-WITH-SELECTED-ID"
+$mp4 = Join-Path $env:LOCALAPPDATA "AGYVideoAB\runtime\$comparison\$trial\clip_00_30.mp4"
+Test-Path -LiteralPath $mp4 -PathType Leaf
+```
+
+Do **not** send all five requests initially. Verify one selected MP4's
+native TUI media chip first; only run the three selected blind cases
+if a model invocation is explicitly approved. Export the responses
+outside all model workspaces and use `import-response` and `score`
+for a separate, private, offline comparison. Remaining two cases are
+reserved for a follow-up only if the triad is inconclusive.
+
+### 2. Use the previously successful MP4 chip route
+
+For each requested MP4 trial, start a **fresh interactive AGY
+conversation** in that trial's isolated workspace. Save the Public repo
+root before changing directories and use the known Windows clipboard
+file-drop helper to register the selected MP4:
+
+```powershell
+$repo = (Get-Location).Path
+$mp4 = "<a new MP4 file path from step 1>"
+$work = Split-Path -Parent $mp4
+
+powershell.exe -NoProfile -STA -File "$repo\tools\agy_media_file_drop.ps1" -FilePath $mp4
+Set-Location -LiteralPath $work
+
+agy --model gemini-3.8-flash-medium --effort medium --dangerously-skip-permissions --sandbox
+```
+
+In the TUI, attach the file using the previously successful **media
+paste gesture** and confirm that an **MP4 media chip**, not just the
+path text, appears. Then paste the following answer-key-free prompt
+generated outside the TUI:
+
+```powershell
+python -m tools.agy_mp4_audio_ab prompt
+```
+
+Run the `prompt` command from the Git checkout, not inside the isolated
+media directory. Paste its **text**, inspect that the MP4 chip remains
+attached, and **only then deliberately press Enter** if a live Gemini
+request is authorized. The CLI argument
+`--dangerously-skip-permissions` bypasses approval prompts; use only
+the isolated, otherwise empty media workspace.
+
+Do not tell the model the answer key, the old MP3 transcript, which
+trial is speech/tone/silence, or the local truth directory. The prompt
+asks independently for `visual_code` and `acoustic_class`, plus
+speech segments or tone count, in a JSON object. A correct *visual*
+code without correct audio behavior is evidence that visual and audio
+access can diverge. No fresh MP3 requests are required.
+
+### 3. Import model JSON outside the workspace; score offline
+
+Save each **raw JSON model reply** to a private file **outside** the
+model workspace and outside the Git checkout. It must match the
+prompt's schema (the helper refuses malformed input and overwrites).
+
+```powershell
+python -m tools.agy_mp4_audio_ab import-response `
+  --session compare-<session-id> `
+  --trial case-<case-id> `
+  --file "<private JSON response file>"
+
+python -m tools.agy_mp4_audio_ab score `
+  --session compare-<session-id>
+```
+
+`score` checks the MP4 visual nonce, acoustic category and hidden
+Korean speech nonce/CER or tone count against **existing private
+ground truth**. It also checks the archived MP3 answer from the
+original session without rerunning its model or modifying old evidence.
+Only fixed categories and booleans are printed:
+
+- `BOTH_BEHAVIORAL_MATCH`: both routes recognized their respective
+  blind acoustic target (not proof of byte transport).
+- `MP4_ONLY_BEHAVIORAL_MATCH`: MP4 passed; prior MP3 did not.
+- `MP3_ONLY_BEHAVIORAL_MATCH`: prior MP3 passed; MP4 did not.
+- `NEITHER_BEHAVIORAL_MATCH`: neither passed the strict acoustic
+  behavior contract.
+- `INCOMPLETE`: a response or other necessary evidence is missing.
+
+An MP4 visual-code match plus acoustic mismatch helps isolate a possible
+**audio-track ingestion** fault after visual attachment; a correct
+acoustic response from MP4 but not MP3 suggests the file-reading
+tool route is inadequate. `score` does not verify whether the AGY
+model used a native attachment rather than a tool; the human operator
+must confirm the chip and inspect the session. If either model could
+access the hidden truth from outside the isolated workspace, the
+behavioral result is invalid. **Neither behavior proves provider
+request MIME/bytes/digest**.
+
+No file is committed to the Public repository; no existing experiment
+is overwritten; this phase does not automatically execute or authorize
+a model call.
+
+### Related upstream protocol failure mode (hypothesis, not AGY proof)
+
+The separate **Google Gemini CLI** repository has documented issues
+where a `read_file` result carrying `audio/mpeg` or `video/mp4`
+was rejected by `function_response.parts`:
+https://github.com/google-gemini/gemini-cli/issues/16741
+https://github.com/google-gemini/gemini-cli/issues/25214
+
+Its current `convertToFunctionResponse` implementation explicitly
+filters audio/video inline parts and uses a separate deferred binary
+injection path for `read_file` and `read_many_files`:
+https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/utils/generateContentResponseUtilities.ts
+
+**This is a protocol-level comparison hypothesis, not an observed AGY
+failure.** A matching `read_file` call in AGY's `stream-json` log
+neither proves nor disproves deferred payload insertion. Conversely,
+a native MP4 chip can represent the video attachment without ensuring
+its contained audio track was forwarded or processed. The matching
+blind MP4(AAC)/MP3 experiment above distinguishes observable behavior,
+not the internal provider request. Do not infer that the two different
+CLIs share code or identical transport mechanics.
