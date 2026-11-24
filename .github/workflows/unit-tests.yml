@@ -55,6 +55,28 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - name: Install offline test dependencies
         run: python -m pip install -r requirements-dev.txt
+      - name: Ensure FFmpeg is available (Ubuntu)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+      - name: Ensure FFmpeg is available (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+            $chocoBin = Join-Path $env:ProgramData "chocolatey\bin"
+            if (Test-Path $chocoBin) {
+              Add-Content -Path $env:GITHUB_PATH -Value $chocoBin
+            }
+          }
+      - name: Verify FFmpeg executable and required encoders
+        run: |
+          python -c "import re, shutil, subprocess; ff = shutil.which('ffmpeg'); assert ff, 'FFMPEG_NOT_FOUND'; v = subprocess.run([ff, '-version'], capture_output=True, text=True, check=True); print(v.stdout.splitlines()[0]); enc = subprocess.run([ff, '-hide_banner', '-encoders'], capture_output=True, text=True, check=True).stdout; missing = [e for e in ('libx264', 'aac') if not re.search(rf'^\s*[VA][A-Za-z.]{{5}}\s+{e}\b', enc, re.M)]; assert not missing, f'MISSING_ENCODERS: {missing}'; print(f'FFMPEG_VERIFIED path={ff} encoders=libx264,aac')"
       - name: Compile source and tests
         run: python -m compileall -q ytresearch tests tools
       - name: Run full isolated unit suite

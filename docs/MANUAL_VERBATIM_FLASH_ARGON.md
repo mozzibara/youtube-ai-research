@@ -112,3 +112,90 @@ This is not a lossless conversion of video frames; preserve the 4K AV1
 original for exact-resolution screenshot evidence. Play and hear the
 result on the local system before attaching to AGY; this does not yet
 prove that the AGY model processed the audio stream.
+
+## Single local video manifest contract (verbatim_single_v1)
+
+Phase 1 separates the input contract for authorized local single-video transcription
+without requiring registration in the legacy 77-source ledger:
+
+- Set `"schema_version": "verbatim_single_v1"` in the manifest JSON.
+- `video_id`: 11-character identifier (`[A-Za-z0-9_-]{11}`).
+- Registry lookup (`read_source_ledger`) is completely bypassed for this schema.
+- Legacy manifests (without `schema_version`) continue to enforce 77-source ledger registration and require all 4 asset roles.
+
+### Asset roles in verbatim_single_v1
+
+| Role | Status | Description | Fallback behavior |
+| --- | --- | --- | --- |
+| `primary_video` | Required | Main video container | None (fails if missing) |
+| `highres_video` | Optional | High-resolution video for screenshots | Falls back to `primary_video` |
+| `audio` | Optional | Separate audio track (e.g. AAC, M4A) | Uses audio stream inside `primary_video` |
+| `subtitle_json3` | Optional | YouTube JSON3 subtitle | Pure audio verbatim mode (captions marked unsupplied) |
+
+Every specified asset must satisfy:
+- Regular non-symlink file under the runtime directory
+- Exact byte length match (`size_bytes`)
+- Exact SHA-256 hex digest match (`sha256`)
+- Immutable output creation: existing files cannot be overwritten or altered.
+
+### Phase 1B input contract, isolation and verification enhancements
+
+1. **Deterministic input digest isolation (`input_digest`)**:
+   - For `verbatim_single_v1`, outputs are written to `data/verbatim/<video_id>/<input_digest>/`.
+   - `input_digest` is the deterministic SHA-256 hash of the canonical JSON containing `schema_version`, `video_id`, and sorted asset roles with verified SHA-256 digests and file sizes.
+   - An immutable `execution_manifest.json` is saved in the output directory, preventing collision or artifact reuse across different inputs for the same video ID. Legacy outputs remain at `data/verbatim/<video_id>/`.
+
+2. **Caption requirement contract & original JSON3 integrity**:
+   - `export()` determines caption requirement based on the input manifest rather than local file presence.
+   - Legacy inputs and new inputs specifying `subtitle_json3` require both `original_captions.json3` and `captions_unedited.md`.
+   - Archived `original_captions.json3` SHA-256 must match the verified input manifest, rejecting simultaneous tampering of JSON3 and rendered Markdown.
+   - Pure audio verbatim export without captions is permitted only for single inputs where `subtitle_json3` is omitted.
+
+3. **Strict path and boundary safety**:
+   - Asset paths and output paths are strictly validated against the approved runtime root.
+   - Leaf symlinks, parent directory symlinks, NTFS directory junctions, and directory traversal attempts (`..`) are rejected fail-closed before any processing.
+
+4. **Media and stream validation**:
+   - Input containers must have valid streams: `primary_video` must contain a decodable video stream, and audio (embedded or separate) must contain an AAC stream.
+   - Non-AAC codecs, missing streams, or corrupted containers fail explicitly with descriptive errors (`STREAM_MISSING`, `AUDIO_CODEC_UNSUPPORTED`, `MEDIA_CORRUPTED`).
+
+5. **Schema determination & conflict prevention**:
+   - Manifests specifying conflicting `schema_version` and `contract` or unsupported future schemas fail immediately (`SCHEMA_CONFLICT`, `SCHEMA_UNSUPPORTED`).
+   - Normal legacy manifests without schema keys remain fully compatible with 77-source ledger verification.
+
+6. **Prompt contract adaptation**:
+   - When `subtitle_json3` is omitted, instructions generated for Flash and Argon explicitly note that no subtitles are supplied, avoiding instructions that demand nonexistent JSON3.
+
+### Phase 1C audit verification and residual defect remediations
+
+1. **Output path and screens directory safety (G01)**:
+   - `screen()` validates `screens/` intermediate directory and target files against symlinks, NTFS directory junctions, and path escape before writing via `create_immutable()`.
+   - `export()` verifies screens directory and child PNG files, refusing to enumerate symlinked or external screen captures as evidence.
+   - Intermediate partial files and destination outputs across `playback`, `playback_compatible`, and `screen` are verified within approved runtime bounds.
+
+2. **Common execution manifest and review binding (G02)**:
+   - `execution_manifest.json` is verified across all downstream operations against schema version, video ID, input digest, and verified asset SHA-256 and size.
+   - When output artifacts exist without an execution manifest, or when the manifest is tampered, automatic reuse is strictly forbidden (`EXECUTION_MANIFEST_MISSING`, `EXECUTION_MANIFEST_TAMPERED`).
+   - Manual review imports create immutable review receipts (`<stage>_review_manifest.json`) binding the draft response hash, input digest, and video ID. Copying review drafts across runs is rejected (`REVIEW_REUSE_FORBIDDEN`).
+
+3. **Public Git and runtime separation (G03)**:
+   - Running verbatim commands with a runtime root located inside a Git checkout or worktree is rejected before any files are opened or written (`PUBLIC_GIT_RUNTIME_FORBIDDEN`).
+
+4. **Reliable manifest path resolution (G04)**:
+   - Relative manifest paths are resolved deterministically against the runtime root, independent of the current working directory, and verified prior to any output file generation.
+
+5. **Strict schema validation and traversal prevention (G05)**:
+   - Unsupported explicit schema values (empty string, integer, boolean, null, conflicting schema/contract) are rejected fail-closed (`SCHEMA_UNSUPPORTED`, `SCHEMA_CONFLICT`).
+   - Directory traversal (`..`) in asset paths, manifest paths, or review files is rejected (`PATH_TRAVERSAL_FORBIDDEN`).
+
+### Phase 1C-Final hardening
+
+1. **Pre-read boundary validation (D-01)**:
+   - Manifest path, Git worktree boundary, `data/` containment, and all parent symlink/junction checks complete before any manifest JSON file is read, and the validated context is reused across downstream stages without re-reading the manifest.
+2. **Unified top-level Runtime root boundary (D-02)**:
+   - All input and output operations (`prepare`, `playback`, `playback_compatible`, `screen`, `import_review`, `export`) enforce the approved Runtime root as the single trust boundary and reject symlinks or junctions on `data/`, `data/verbatim/`, `screens/`, and leaf targets.
+3. **Ordered execution manifest and idempotent retry (D-04, D-06)**:
+   - `prepare()` validates inputs and captions before atomically publishing `execution_manifest.json` via `os.link`, then writes immutable artifacts; `playback()` and `playback_compatible()` validate media streams and AAC codec before writing `execution_manifest.json`.
+4. **Fail-closed JSON object validation and CI FFmpeg check (D-03, D-05)**:
+   - Non-object JSON payloads for manifests, captions, execution manifests, and review receipts fail closed with `VerbatimError`.
+   - Offline CI workflows explicitly verify `ffmpeg` availability with `libx264` and `aac` encoders on Ubuntu and Windows.

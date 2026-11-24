@@ -293,7 +293,7 @@ def main():
     if args.command == "verbatim-manual":
         import json
         from .manual_verbatim import prepare, playback, playback_compatible, screen, import_review, export
-        root = Path(args.root).resolve()
+        root = Path(args.root)
         if args.operation == "prepare":
             result = prepare(root, args.manifest)
         elif args.operation == "playback":
