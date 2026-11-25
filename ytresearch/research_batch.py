@@ -655,6 +655,174 @@ def inspect_capture_sources(root, folder, log_path, brain_before, clipboard):
     return result
 
 
+# Historical recovery may follow only an explicit, unique UUID-valued field
+# in the dedicated experiment log. Never search old transcript contents.
+SESSION_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+SESSION_ID_FIELD = re.compile(
+    r'\b(?:session[_ -]?id|conversation[_ -]?id|cascade[_ -]?id)["\x27]?\s*[:=]\s*["\x27]?('
+    + SESSION_UUID + r')(?![0-9a-fA-F-])', re.I)
+
+
+def explicit_session_ids(raw):
+    return {m.group(1).lower() for m in SESSION_ID_FIELD.finditer(
+        raw.decode("utf-8-sig", errors="replace"))}
+
+
+def brain_root():
+    p = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+    if any(_is_symlink_or_junction(q) for q in (p, *p.parents)) or not p.is_dir():
+        return None
+    return p
+
+
+def persist_session_baseline(root, folder):
+    before = fresh_brain_dirs()
+    if before is None:
+        raise BatchError("SESSION_BASELINE_UNAVAILABLE")
+    # Private identifier inventory, never printed or passed to a model.
+    write_once(root, folder / "session-baseline.json",
+               json_bytes({"schema": "wp1_session_baseline_v1",
+                           "directory_names": sorted(before[1])}))
+    return before
+
+
+def session_shape(raw, clipboard):
+    """Only allowlisted structural counts; never expose arbitrary values."""
+    fields = ("type", "source", "status", "step_index", "content", "text",
+              "message", "response", "media", "tool_calls", "created_at")
+    types = ("USER_INPUT", "PLANNER_RESPONSE", "GENERIC", "SYSTEM_MESSAGE",
+             "ERROR_MESSAGE", "CONVERSATION_HISTORY", "CHECKPOINT")
+    statuses = ("DONE", "ACTIVE", "ERROR", "SUCCESS", "CANCELED")
+    out = {"rows": 0, "invalid_rows": 0, "fields": {}, "types": {},
+           "statuses": {}, "content_types": {}, "matching_prompt_rows": 0,
+           "matching_response_rows": 0, "recorded_tool_rows": 0}
+    target = validate_response(clipboard)
+
+    def inc(group, key):
+        bucket = out[group]
+        bucket[key] = bucket.get(key, 0) + 1
+
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        out["rows"] += 1
+        if out["rows"] > 10000:
+            out["limit_reached"] = True
+            break
+        try:
+            row = parse_json(line)
+        except (ValueError, RecursionError):
+            out["invalid_rows"] += 1
+            continue
+        if not isinstance(row, dict):
+            out["invalid_rows"] += 1
+            continue
+        for key in row:
+            inc("fields", key if key in fields else "OTHER")
+        for key, allowed, group in (("type", types, "types"), ("status", statuses, "statuses")):
+            value = row.get(key)
+            inc(group, value if isinstance(value, str) and value in allowed else "OTHER")
+        content = row.get("content")
+        inc("content_types", type(content).__name__ if type(content) in
+            (str, dict, list, type(None), int, bool, float) else "OTHER")
+        if isinstance(content, str):
+            if content.replace("\r\n", "\n").strip() == PROMPT.strip():
+                out["matching_prompt_rows"] += 1
+            try:
+                if validate_response(content.encode("utf-8")) == target:
+                    out["matching_response_rows"] += 1
+            except (ValueError, UnicodeError, RecursionError):
+                pass
+        if row.get("tool_calls"):
+            out["recorded_tool_rows"] += 1
+    return out
+
+
+def recover_session(root, bid, *, operator_closed):
+    """Use persisted new-session baseline or a unique explicit historical ID."""
+    if not operator_closed:
+        raise BatchError("OPERATOR_CLOSE_CONFIRMATION_REQUIRED")
+    root, base, plan = load_plan(root, bid)
+    if len(plan["jobs"]) != 1:
+        raise BatchError("SESSION_PROBE_SINGLE_JOB_REQUIRED")
+    folder = base / plan["jobs"][0]["id"]
+    lock = safe_path(root, base / "controller.lock")
+    with lock.open("xb") as f:
+        f.write(b"SESSION_RECOVERY_CONTROLLER\n")
+    try:
+        summary = report(root, bid)
+        if summary["reserved_attempts"] != 1 or summary["jobs"][0]["status"] != "CAPTURED":
+            raise BatchError("EXISTING_CAPTURE_REQUIRED")
+        clipboard = read_bytes(safe_path(root, folder / "response.txt"))
+        validate_response(clipboard)
+        result = {"batch_id": bid, "status": "NO_CORRELATED_SESSION",
+                  "script_submitted_model_requests": 0,
+                  "provider_ingress_verified": False,
+                  "automatic_response_capture_verified": False,
+                  "other_session_logs_read": 0, "candidate_logs_read": 0,
+                  "paired_log_capture_match": False}
+        baseline = safe_path(root, folder / "session-baseline.json")
+        brain = brain_root()
+        candidate = None
+        if baseline.exists():
+            saved = parse_json(read_bytes(baseline))
+            names = saved.get("directory_names")
+            if (saved.get("schema") != "wp1_session_baseline_v1"
+                    or not isinstance(names, list) or len(names) > 10000
+                    or any(not isinstance(n, str) for n in names)):
+                raise BatchError("SESSION_BASELINE_INVALID")
+            after = fresh_brain_dirs()
+            if after is not None:
+                new = after[1] - set(names)
+                result["new_session_count"] = len(new)
+                if len(new) == 1:
+                    candidate = next(iter(new))
+                    result["correlation"] = "UNIQUE_NEW_DIRECTORY"
+        else:
+            snapshot = safe_path(root, folder / "cli-log.snapshot")
+            old_probe = safe_path(root, folder / "log-probe.json")
+            if snapshot.is_file() and old_probe.is_file():
+                raw = read_bytes(snapshot, MAX_LOG)
+                probe = parse_json(read_bytes(old_probe))
+                if digest(raw) != probe.get("cli_log", {}).get("sha256"):
+                    raise BatchError("CLI_LOG_HASH_MISMATCH")
+                ids = explicit_session_ids(raw)
+                result["explicit_session_id_count"] = len(ids)
+                if len(ids) == 1:
+                    candidate = next(iter(ids))
+                    result["correlation"] = "EXPLICIT_ID_IN_DEDICATED_LOG"
+        if candidate is not None and brain is not None:
+            # Single basename, no traversal, no symlinks/junctions, no recursive search.
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", candidate):
+                raise BatchError("UNSAFE_SESSION_IDENTIFIER")
+            trace = brain / candidate / "transcript_full.jsonl"
+            if any(_is_symlink_or_junction(p) for p in (trace, *trace.parents)):
+                raise BatchError("UNSAFE_SESSION_PATH")
+            if trace.is_file():
+                raw = read_bytes(trace, MAX_LOG)
+                result["candidate_logs_read"] = 1
+                response = session_log_candidate(raw)
+                match = compare_capture_candidate(response, clipboard)
+                result["status"] = match
+                # Historical correlation is weaker; expose structure only if
+                # the response/prompt establishes correlation, or the new
+                # directory was identified from the persisted baseline.
+                if match in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
+                    result["paired_log_capture_match"] = True
+                    write_once(root, folder / "recovered-session.snapshot", raw)
+                    write_once(root, folder / "recovered-session.response.txt", response)
+                    result["session_sha256"] = digest(raw)
+                if result["paired_log_capture_match"] or baseline.exists():
+                    result["shape"] = session_shape(raw, clipboard)
+            else:
+                result["status"] = "CORRELATED_SESSION_FILE_MISSING"
+        encoded = json_bytes(result)
+        write_once(root, folder / ("session-recovery-" + digest(encoded)[:24] + ".json"), encoded)
+        return result
+    finally:
+        lock.unlink()
+
+
 def recover_log(root, bid, *, operator_closed):
     """Recover an existing paired pilot without AGY, GUI, clipboard or new claims."""
     if not operator_closed:
@@ -721,7 +889,7 @@ def wait_window_closed(pg, hwnd, *, timeout=10):
         time.sleep(.25)
 
 
-def guided_run(root, bid, max_calls, *, probe_log=False):
+def guided_run(root, bid, max_calls, *, probe_log=False, probe_session=False):
     """Windows-only operator-gated staging. Never presses Enter or retries."""
     if os.name != "nt":
         raise BatchError("INTERACTIVE_WINDOWS_REQUIRED")
@@ -730,7 +898,7 @@ def guided_run(root, bid, max_calls, *, probe_log=False):
     root, base, plan = load_plan(root, bid)
     if max_calls > len(plan["jobs"]):
         raise BatchError("LIMIT_EXCEEDS_PLAN")
-    if probe_log and (max_calls != 1 or len(plan["jobs"]) != 1):
+    if (probe_log or probe_session) and (max_calls != 1 or len(plan["jobs"]) != 1):
         raise BatchError("LOG_PROBE_SINGLE_JOB_REQUIRED")
     if probe_log and "--log-file" not in capability_probe()["flags"]:
         raise BatchError("LOG_FILE_FLAG_UNAVAILABLE")
@@ -755,7 +923,7 @@ def guided_run(root, bid, max_calls, *, probe_log=False):
             work, media = workspace(root, base, job, plan)
             folder = base / job["id"]
             log_path = safe_path(root, folder / ("agy-" + uuid.uuid4().hex + ".log")) if probe_log else None
-            brain_before = fresh_brain_dirs() if probe_log else None
+            brain_before = persist_session_baseline(root, folder) if (probe_log or probe_session) else None
             claim(root, base, job)
             used += 1
             hwnd = stage_window(root, base, job, plan, pg, pyperclip, log_path=log_path)
@@ -805,11 +973,12 @@ def main(argv=None):
     modes.add_argument("--guided", action="store_true")
     modes.add_argument("--stage-only", action="store_true")
     prep.add_argument("--max-calls", type=int)
-    for name in ("report", "run", "stage", "recover-log"):
+    prep.add_argument("--probe-session", action="store_true")
+    for name in ("report", "run", "stage", "recover-log", "recover-session"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
         p.add_argument("--batch", required=True)
-        if name == "recover-log":
+        if name in ("recover-log", "recover-session"):
             p.add_argument("--confirm-closed", action="store_true")
         if name == "run":
             p.add_argument("--max-calls", type=int, required=True)
@@ -820,13 +989,17 @@ def main(argv=None):
         if args.command == "probe":
             result = capability_probe()
         elif args.command == "prepare":
+            if args.probe_session and (not args.guided or args.max_calls != 1):
+                raise BatchError("SESSION_PROBE_REQUIRES_GUIDED_SINGLE_JOB")
             if args.guided != (args.max_calls is not None):
                 raise BatchError("GUIDED_REQUIRES_EXPLICIT_TOTAL_LIMIT")
             bid = prepare(args.root, args.media, args.reference, args.reference_kind,
                           args.models, args.trial)
             print("BATCH_ID=" + bid, flush=True)
             if args.guided:
-                result = guided_run(args.root, bid, args.max_calls)
+                result = guided_run(args.root, bid, args.max_calls, probe_session=args.probe_session)
+                if args.probe_session:
+                    result["session_probe"] = recover_session(args.root, bid, operator_closed=True)
             elif args.stage_only:
                 result = stage_only(args.root, bid)
             else:
@@ -839,6 +1012,8 @@ def main(argv=None):
             result = stage_only(args.root, args.batch)
         elif args.command == "recover-log":
             result = recover_log(args.root, args.batch, operator_closed=args.confirm_closed)
+        elif args.command == "recover-session":
+            result = recover_session(args.root, args.batch, operator_closed=args.confirm_closed)
         else:
             result = report(args.root, args.batch)
         print(json_bytes(result).decode("utf-8"), end="")

@@ -175,3 +175,26 @@ this stopped process; no old brain session is scanned. A new guided call now
 allows a short window-teardown grace period and a close confirmation before
 stopping with its already preserved capture. A captured UNAVAILABLE response
 is a speech-quality failure, not proof of successful transcription.
+
+### Session-first capture follow-up
+
+The first local dedicated CLI log was text diagnostics and contained no
+recognizable matching response. Prefer the session trace; do not expand the
+CLI debug parser on this evidence. The prelaunch directory inventory is now
+persisted privately. If interrupted, recover using recover-session with
+--confirm-closed. Historical recovery without an inventory follows only a
+unique explicit UUID-valued session/conversation/cascade ID in the verified
+dedicated log snapshot; it never searches old transcript contents or guesses
+from timestamps. If no exact identifier exists, it reads zero session logs.
+
+    python -m ytresearch.research_batch recover-session --root D:\private-runtime --batch BATCH_ID --confirm-closed
+
+For an explicitly approved new single-call paired pilot without --log-file:
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-3.8-flash-medium --trial session-pilot-1 --guided --max-calls 1 --probe-session
+
+The usual READY, manual single submit, clipboard copy, close and CAPTURE
+remain for this pilot only. Session comparison runs after closure and can be
+recovered without resubmission. Only allowlisted schema counts are reported;
+raw trace is retained privately only after prompt/response correlation.
+A paired match does not establish autonomous completion or speech accuracy.

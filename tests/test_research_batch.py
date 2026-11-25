@@ -236,6 +236,53 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertFalse(info["log_probe"]["paired_log_capture_match"])
         self.assertFalse(info["recovery"]["old_session_scan_performed"])
 
+    def test_explicit_session_identifier_is_strict(self):
+        token = "12345678-1234-1234-1234-123456789abc"
+        self.assertEqual(b.explicit_session_ids(("session_id=" + token).encode()), {token})
+        self.assertEqual(b.explicit_session_ids(("session_id mentioned " + token).encode()), set())
+        self.assertEqual(b.explicit_session_ids(b"session_id=../../other"), set())
+
+    def test_recover_session_from_persisted_baseline_no_external_call(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        (brain / "old").mkdir(parents=True)
+        (brain / "new").mkdir()
+        raw = b.json_bytes({"transcript":"alpha", "uncertainties":[], "status":"COMPLETE"})
+        trace = b"\n".join(json.dumps(row).encode() for row in (
+            {"type":"USER_INPUT","content":b.PROMPT},
+            {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}))
+        (brain / "new" / "transcript_full.jsonl").write_bytes(trace)
+        (brain / "old" / "transcript_full.jsonl").write_bytes(b"private")
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, {"old"})):
+            b.persist_session_baseline(root, folder)
+        b.claim(root, base, job)
+        b.capture(root, base, job, raw, 1)
+        with patch.object(b, "brain_root", return_value=brain), patch.object(
+                b, "fresh_brain_dirs", return_value=(brain, {"old", "new"})), patch.object(
+                b.subprocess, "run", side_effect=AssertionError("external process forbidden")):
+            result = b.recover_session(root, bid, operator_closed=True)
+        self.assertTrue(result["paired_log_capture_match"])
+        self.assertEqual(result["candidate_logs_read"], 1)
+        self.assertEqual(result["other_session_logs_read"], 0)
+        self.assertEqual(result["script_submitted_model_requests"], 0)
+        self.assertEqual(result["shape"]["matching_prompt_rows"], 1)
+        self.assertEqual(result["shape"]["matching_response_rows"], 1)
+
+    def test_recover_session_historical_missing_id_no_scan(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        b.capture(root, base, job, b.json_bytes({
+            "transcript":"alpha", "uncertainties":[], "status":"COMPLETE"}), 1)
+        with patch.object(b, "fresh_brain_dirs", side_effect=AssertionError("no scan")):
+            result = b.recover_session(root, bid, operator_closed=True)
+        self.assertEqual(result["status"], "NO_CORRELATED_SESSION")
+        self.assertEqual(result["candidate_logs_read"], 0)
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
