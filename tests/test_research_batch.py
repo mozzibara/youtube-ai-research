@@ -199,6 +199,43 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(info["session_log"]["status"], "EXACT_TEXT_MATCH")
         self.assertNotIn(b"old private data", (self.root / folder / "session-log.snapshot").read_bytes())
 
+    def test_recover_existing_capture_no_gui_or_model(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        raw = b.json_bytes({"transcript":"", "uncertainties":["unavailable"], "status":"UNAVAILABLE"})
+        b.capture(root, base, job, raw, 1)
+        log = root / base / job["id"] / ("agy-" + "a" * 32 + ".log")
+        log.write_bytes(json.dumps({"event":"result","result":{
+            "status":"SUCCESS","response":raw.decode()}}).encode())
+        with patch.object(b, "gui_context", side_effect=AssertionError("GUI forbidden")), patch.object(
+                b, "fresh_brain_dirs", side_effect=AssertionError("old session scan forbidden")), patch.object(
+                b.subprocess, "run", side_effect=AssertionError("external process forbidden")):
+            recovered = b.recover_log(root, bid, operator_closed=True)
+            self.assertEqual(recovered, b.recover_log(root, bid, operator_closed=True))
+        self.assertEqual(recovered["reserved_attempts"], 1)
+        self.assertEqual(recovered["recovery"]["script_submitted_model_requests"], 0)
+        self.assertTrue(recovered["log_probe"]["paired_log_capture_match"])
+        self.assertFalse(recovered["jobs"][0]["transcript_nonempty"])
+        self.assertEqual((root / base / "j01/response.txt").read_bytes(), raw)
+
+    def test_recovery_missing_log_and_confirmation(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        with self.assertRaisesRegex(b.BatchError, "OPERATOR_CLOSE_CONFIRMATION_REQUIRED"):
+            b.recover_log(root, bid, operator_closed=False)
+        with self.assertRaisesRegex(b.BatchError, "EXISTING_CAPTURE_REQUIRED"):
+            b.recover_log(root, bid, operator_closed=True)
+        b.claim(root, base, job)
+        b.capture(root, base, job, b.json_bytes({
+            "transcript":"alpha", "uncertainties":[], "status":"COMPLETE"}), 1)
+        info = b.recover_log(root, bid, operator_closed=True)
+        self.assertEqual(info["log_probe"]["cli_log"]["status"], "MISSING")
+        self.assertFalse(info["log_probe"]["paired_log_capture_match"])
+        self.assertFalse(info["recovery"]["old_session_scan_performed"])
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

@@ -158,3 +158,20 @@ not proof of automated completion detection, provider ingress or future stabilit
 If neither candidate is available, the pilot still preserves the manual capture;
 do not resubmit just to obtain logs. The operator must copy the response before
 closing AGY and type CAPTURE manually. No automatic Enter or retry.
+
+### Interrupted paired capture recovery
+
+If CAPTURED was printed but the terminal closure check blocked the log probe,
+close only that experiment window. Do not send another prompt. Run:
+
+    python -m ytresearch.research_batch recover-log --root D:\private-runtime --batch BATCH_ID --confirm-closed
+
+Recovery checks the existing single-job claim and receipt, response hash, and
+schema. It inspects only a unique dedicated agy-<32 hex>.log in that job folder,
+or reuses an existing completed probe. No AGY, GUI, clipboard or new claims.
+Missing/ambiguous logs are reported without guessing. The historical before
+session directory snapshot was held in memory, so it cannot be recovered from
+this stopped process; no old brain session is scanned. A new guided call now
+allows a short window-teardown grace period and a close confirmation before
+stopping with its already preserved capture. A captured UNAVAILABLE response
+is a speech-quality failure, not proof of successful transcription.

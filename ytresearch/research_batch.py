@@ -71,6 +71,9 @@ def safe_root(raw):
 
 
 def safe_path(root, relative):
+    # Canonicalize the approved root before containment comparison (Windows
+    # short-name and long-name representations can differ).
+    root = safe_root(root)
     rel = Path(relative)
     if (rel.is_absolute() or rel.drive or rel.anchor or ".." in rel.parts
             or not rel.parts or any(":" in part for part in rel.parts)):
@@ -604,12 +607,15 @@ def compare_capture_candidate(candidate, clipboard):
 
 def inspect_capture_sources(root, folder, log_path, brain_before, clipboard):
     """Scoped post-close pilot; no stdout transcript or raw log contents."""
+    root = safe_root(root)
     result = {"cli_log": {"status": "MISSING"}, "session_log": {"status": "NOT_AVAILABLE"},
               "automatic_response_capture_verified": False,
               "provider_ingress_verified": False}
     if log_path.exists():
         try:
-            rel = log_path.relative_to(root)
+            if any(_is_symlink_or_junction(p) for p in (log_path, *log_path.parents)):
+                raise BatchError("REPARSE_POINT_FORBIDDEN")
+            rel = log_path.resolve().relative_to(root)
             raw = read_bytes(safe_path(root, rel), MAX_LOG)
             write_once(root, folder / "cli-log.snapshot", raw)
             candidate = terminal_log_candidate(raw)
@@ -634,7 +640,7 @@ def inspect_capture_sources(root, folder, log_path, brain_before, clipboard):
                                              "new_session_count": 1}
                     # Do not copy a session trace unless the exact prompt AND
                     # a completed schema-valid response establish correlation.
-                    if candidate is not None:
+                    if result["session_log"]["status"] in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
                         write_once(root, folder / "session-log.snapshot", raw)
                         write_once(root, folder / "session-log.response.txt", candidate)
                         result["session_log"].update(sha256=digest(raw), bytes=len(raw))
@@ -647,6 +653,72 @@ def inspect_capture_sources(root, folder, log_path, brain_before, clipboard):
     # One paired trial does not prove unattended completion detection or stability.
     write_once(root, folder / "log-probe.json", json_bytes(result))
     return result
+
+
+def recover_log(root, bid, *, operator_closed):
+    """Recover an existing paired pilot without AGY, GUI, clipboard or new claims."""
+    if not operator_closed:
+        raise BatchError("OPERATOR_CLOSE_CONFIRMATION_REQUIRED")
+    root, base, plan = load_plan(root, bid)
+    if len(plan["jobs"]) != 1:
+        raise BatchError("LOG_PROBE_SINGLE_JOB_REQUIRED")
+    job = plan["jobs"][0]
+    folder = base / job["id"]
+    lock = safe_path(root, base / "controller.lock")
+    with lock.open("xb") as f:
+        f.write(b"RECOVERY_CONTROLLER\n")
+    try:
+        result = report(root, bid)
+        if result["jobs"][0]["status"] != "CAPTURED" or result["reserved_attempts"] != 1:
+            raise BatchError("EXISTING_CAPTURE_REQUIRED")
+        raw = read_bytes(safe_path(root, folder / "response.txt"))
+        receipt = parse_json(read_bytes(safe_path(root, folder / "receipt.json")))
+        if digest(raw) != receipt["response_sha256"]:
+            raise BatchError("CAPTURE_HASH_MISMATCH")
+        validate_response(raw)
+        # No scan of the AGY brain. The old before-launch snapshot was not
+        # persisted; its uniqueness cannot be reconstructed from timestamps.
+        job_dir = safe_path(root, folder)
+        logs = [p for p in job_dir.iterdir()
+                if re.fullmatch(r"agy-[0-9a-f]{32}\.log", p.name)]
+        probe_file = safe_path(root, folder / "log-probe.json")
+        if probe_file.exists():
+            probe = parse_json(read_bytes(probe_file))
+        elif len(logs) == 1:
+            probe = inspect_capture_sources(root, folder, logs[0], None, raw)
+        else:
+            probe = {
+                "cli_log": {"status": "MISSING" if not logs else "AMBIGUOUS_LOG", "candidate_count": len(logs)},
+                "session_log": {"status": "BASELINE_NOT_RECOVERABLE"},
+                "paired_log_capture_match": False,
+                "automatic_response_capture_verified": False,
+                "provider_ingress_verified": False,
+            }
+        result["log_probe"] = probe
+        result["recovery"] = {
+            "script_submitted_model_requests": 0,
+            "existing_capture_sha256": digest(raw),
+            "operator_declared_window_closed": True,
+            "old_session_scan_performed": False,
+            "historical_session_baseline_recoverable": False,
+        }
+        encoded = json_bytes(result)
+        write_once(root, base / "reports" / ("recovery-" + digest(encoded)[:24] + ".json"), encoded)
+        return result
+    finally:
+        lock.unlink()
+
+
+def wait_window_closed(pg, hwnd, *, timeout=10):
+    """Allow asynchronous Windows Terminal teardown, never kill processes."""
+    from tools.agy_media_probe import windows
+    until = time.monotonic() + timeout
+    while True:
+        if not any(h == hwnd for h, _, _ in windows(pg)):
+            return True
+        if time.monotonic() >= until:
+            return False
+        time.sleep(.25)
 
 
 def guided_run(root, bid, max_calls, *, probe_log=False):
@@ -698,8 +770,12 @@ def guided_run(root, bid, max_calls, *, probe_log=False):
             print(job["id"], status)
             if status != "CAPTURED":
                 raise BatchError("INVALID_CAPTURE_STOP")
-            if any(h == hwnd for h, _, _ in windows(pg)):
-                raise BatchError("AGY_WINDOW_STILL_OPEN")
+            if not wait_window_closed(pg, hwnd):
+                print("Response already saved. Close only the experiment AGY window; do not submit again.")
+                if input("Type CLOSED after the window closes, or STOP: ").strip() != "CLOSED":
+                    raise BatchError("CAPTURE_SAVED_LOG_RECOVERY_REQUIRED")
+                if not wait_window_closed(pg, hwnd):
+                    raise BatchError("CAPTURE_SAVED_LOG_RECOVERY_REQUIRED")
             if probe_log:
                 print("LOG_CAPTURE_PROBE=" + json.dumps(
                     inspect_capture_sources(root, folder, log_path, brain_before, raw),
@@ -729,10 +805,12 @@ def main(argv=None):
     modes.add_argument("--guided", action="store_true")
     modes.add_argument("--stage-only", action="store_true")
     prep.add_argument("--max-calls", type=int)
-    for name in ("report", "run", "stage"):
+    for name in ("report", "run", "stage", "recover-log"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
         p.add_argument("--batch", required=True)
+        if name == "recover-log":
+            p.add_argument("--confirm-closed", action="store_true")
         if name == "run":
             p.add_argument("--max-calls", type=int, required=True)
             p.add_argument("--authorize-guided", action="store_true")
@@ -759,6 +837,8 @@ def main(argv=None):
             result = guided_run(args.root, args.batch, args.max_calls, probe_log=args.probe_log)
         elif args.command == "stage":
             result = stage_only(args.root, args.batch)
+        elif args.command == "recover-log":
+            result = recover_log(args.root, args.batch, operator_closed=args.confirm_closed)
         else:
             result = report(args.root, args.batch)
         print(json_bytes(result).decode("utf-8"), end="")
