@@ -145,6 +145,60 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(info["version"], "1.5.16")
         self.assertFalse(info["headless_media_verified"])
 
+    def test_terminal_log_requires_unique_success_final(self):
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        result = b.json_bytes({"event":"result","result":{"status":"SUCCESS","response":raw.decode()}})
+        # Real stream JSON events occupy one line each.
+        event = json.dumps(json.loads(result), separators=(",", ":")).encode()
+        self.assertEqual(b.terminal_log_candidate(event), raw)
+        self.assertIsNone(b.terminal_log_candidate(event + b"\n" + event))
+        self.assertIsNone(b.terminal_log_candidate(b'{"event":"step_update","step_update":{}}'))
+        self.assertIsNone(b.terminal_log_candidate(b'{"event":"result","result":{"status":"ERROR"}}'))
+        self.assertIsNone(b.terminal_log_candidate(b"debug\n" + event))
+        self.assertEqual(b.compare_capture_candidate(raw, b" " + raw), "JSON_CONTENT_MATCH")
+        self.assertEqual(b.compare_capture_candidate(raw, raw), "EXACT_TEXT_MATCH")
+
+    def test_session_candidate_exact_single_turn_no_tools(self):
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        rows = [{"type":"USER_INPUT","content":b.PROMPT},
+                {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE",
+                 "content":raw.decode(),"tool_calls":[]}]
+        encode = lambda: b"\n".join(json.dumps(row).encode() for row in rows)
+        self.assertEqual(b.session_log_candidate(encode()), raw)
+        rows[0]["content"] = "other prompt"
+        self.assertIsNone(b.session_log_candidate(encode()))
+        rows[0]["content"] = b.PROMPT
+        rows[1]["tool_calls"] = [{"name":"read_file"}]
+        self.assertIsNone(b.session_log_candidate(encode()))
+        rows[1]["tool_calls"] = []
+        rows[1]["status"] = "ACTIVE"
+        self.assertIsNone(b.session_log_candidate(encode()))
+        rows[1]["status"] = "DONE"
+        rows.append(dict(rows[0]))
+        self.assertIsNone(b.session_log_candidate(encode()))
+
+    def test_log_probe_preserves_only_scoped_matched_session(self):
+        folder = Path("private-job")
+        (self.root / folder).mkdir()
+        log = self.root / folder / "agy.log"
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        log.write_bytes(json.dumps({"event":"result","result":{
+            "status":"SUCCESS","response":raw.decode()}}).encode())
+        brain = self.root / "brain"
+        (brain / "old").mkdir(parents=True)
+        (brain / "new").mkdir()
+        (brain / "old" / "transcript_full.jsonl").write_bytes(b"old private data")
+        (brain / "new" / "transcript_full.jsonl").write_bytes(
+            b"\n".join(json.dumps(row).encode() for row in (
+                {"type":"USER_INPUT","content":b.PROMPT},
+                {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()})))
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, {"old","new"})):
+            info = b.inspect_capture_sources(self.root, folder, log, (brain, {"old"}), raw)
+        self.assertTrue(info["paired_log_capture_match"])
+        self.assertFalse(info["automatic_response_capture_verified"])
+        self.assertEqual(info["session_log"]["status"], "EXACT_TEXT_MATCH")
+        self.assertNotIn(b"old private data", (self.root / folder / "session-log.snapshot").read_bytes())
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

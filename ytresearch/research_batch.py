@@ -42,6 +42,7 @@ PROBE_FLAGS = FLAGS + ("--log-file", "--input-format", "--output-format",
                        "--json-schema", "--attachment", "--media", "--video", "--file")
 REF_KINDS = ("UNVERIFIED", "CAPTION_PROXY", "OPERATOR_DECLARED_HUMAN_REVIEWED")
 MAX_TEXT = 1_000_000
+MAX_LOG = 25 * 1024 * 1024
 MAX_MEDIA = 250 * 1024 * 1024
 MAX_EDIT_CELLS = 12_000_000
 
@@ -414,18 +415,23 @@ def gui_context():
     return pg, pyperclip
 
 
-def stage_window(root, base, job, plan, pg, pyperclip):
+def stage_window(root, base, job, plan, pg, pyperclip, log_path=None):
     from tools.agy_media_probe import choose_window, focus, ps_quote, windows
     work, media = workspace(root, base, job, plan)
     title = "AGY_WP1_" + uuid.uuid4().hex[:12].upper()
-    launcher = safe_path(root, base / job["id"] / "launch.ps1")
+    launcher = safe_path(root, base / job["id"] / (title + ".ps1"))
     exe = shutil.which("agy") or shutil.which("agy.cmd")
+    log_arg = ""
+    if log_path is not None:
+        if log_path.exists():
+            raise BatchError("LOG_PATH_ALREADY_EXISTS")
+        log_arg = " --log-file " + ps_quote(str(log_path))
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "Set-Location -LiteralPath " + ps_quote(str(work)),
         "$env:AGY_CLI_DISABLE_AUTO_UPDATE = 'true'",
         "& " + ps_quote(exe) + " --model " + job["model"]
-        + " --effort " + job["effort"] + " --dangerously-skip-permissions --sandbox",
+        + " --effort " + job["effort"] + " --dangerously-skip-permissions --sandbox" + log_arg,
     ]
     create_immutable(launcher, ("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
     before = {h for h, _, _ in windows(pg)}
@@ -504,7 +510,146 @@ def stage_only(root, bid):
         lock.unlink()
 
 
-def guided_run(root, bid, max_calls):
+def terminal_log_candidate(raw):
+    """Accept only a strict terminal CLI result, never debug text or partial deltas."""
+    rows = [line for line in raw.splitlines() if line.strip()]
+    if not rows or len(rows) > 10000:
+        return None
+    try:
+        events = [parse_json(line) for line in rows]
+        if any(not isinstance(e, dict) or e.get("event") not in
+               ("init", "step_update", "result") for e in events):
+            return None
+        if sum(e["event"] == "result" for e in events) != 1 or events[-1]["event"] != "result":
+            return None
+        result = events[-1].get("result")
+        if not isinstance(result, dict) or result.get("status") != "SUCCESS":
+            return None
+        response = result.get("response")
+        if not isinstance(response, str):
+            return None
+        candidate = response.encode("utf-8")
+        if len(candidate) > MAX_TEXT:
+            return None
+        validate_response(candidate)
+        return candidate
+    except (BatchError, UnicodeError, TypeError, ValueError):
+        return None
+
+
+def fresh_brain_dirs():
+    """List only immediate directory names; never read existing conversation logs."""
+    brain = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+    if any(_is_symlink_or_junction(p) for p in (brain, *brain.parents)):
+        return None
+    if not brain.is_dir():
+        return None
+    found = set()
+    try:
+        for i, p in enumerate(brain.iterdir(), 1):
+            if i > 10000:
+                return None
+            if not _is_symlink_or_junction(p) and p.is_dir():
+                found.add(p.name)
+    except OSError:
+        return None
+    return brain, found
+
+
+def session_log_candidate(raw):
+    """Only one exact prompt turn with a completed final MODEL planner response."""
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines or len(lines) > 10000:
+        return None
+    try:
+        rows = [parse_json(line) for line in lines]
+        if any(not isinstance(row, dict) for row in rows):
+            return None
+        inputs = [row for row in rows if row.get("type") == "USER_INPUT"]
+        if len(inputs) != 1:
+            return None
+        prompt = inputs[0].get("content")
+        if not isinstance(prompt, str) or prompt.replace("\r\n", "\n").strip() != PROMPT.strip():
+            return None
+        # No unrelated prior turns, incomplete final response, or recorded tool calls.
+        planners = [row for row in rows[rows.index(inputs[0]) + 1:]
+                    if row.get("type") == "PLANNER_RESPONSE"]
+        if not planners or any(row.get("tool_calls") for row in rows):
+            return None
+        last = planners[-1]
+        if last.get("source") != "MODEL" or last.get("status") != "DONE":
+            return None
+        content = last.get("content")
+        if not isinstance(content, str):
+            return None
+        candidate = content.encode("utf-8")
+        if len(candidate) > MAX_TEXT:
+            return None
+        validate_response(candidate)
+        return candidate
+    except (BatchError, UnicodeError, ValueError, TypeError):
+        return None
+
+
+def compare_capture_candidate(candidate, clipboard):
+    if candidate is None:
+        return "NO_VALID_CANDIDATE"
+    try:
+        return ("EXACT_TEXT_MATCH" if candidate == clipboard else
+                "JSON_CONTENT_MATCH" if validate_response(candidate) == validate_response(clipboard)
+                else "CONTENT_MISMATCH")
+    except BatchError:
+        return "INVALID_CLIPBOARD_COMPARISON"
+
+
+def inspect_capture_sources(root, folder, log_path, brain_before, clipboard):
+    """Scoped post-close pilot; no stdout transcript or raw log contents."""
+    result = {"cli_log": {"status": "MISSING"}, "session_log": {"status": "NOT_AVAILABLE"},
+              "automatic_response_capture_verified": False,
+              "provider_ingress_verified": False}
+    if log_path.exists():
+        try:
+            rel = log_path.relative_to(root)
+            raw = read_bytes(safe_path(root, rel), MAX_LOG)
+            write_once(root, folder / "cli-log.snapshot", raw)
+            candidate = terminal_log_candidate(raw)
+            result["cli_log"] = {"status": compare_capture_candidate(candidate, clipboard),
+                                 "sha256": digest(raw), "bytes": len(raw)}
+            if candidate is not None:
+                write_once(root, folder / "cli-log.response.txt", candidate)
+        except (OSError, ValueError):
+            result["cli_log"] = {"status": "UNREADABLE_OR_OVERSIZED"}
+    after = fresh_brain_dirs() if brain_before is not None else None
+    if after is not None and after[0] == brain_before[0]:
+        brain, names = after
+        new = names - brain_before[1]
+        result["session_log"] = {"status": "NO_UNIQUE_NEW_SESSION", "new_session_count": len(new)}
+        if len(new) == 1:
+            path = brain / next(iter(new)) / "transcript_full.jsonl"
+            if not any(_is_symlink_or_junction(p) for p in (path, *path.parents)):
+                try:
+                    raw = read_bytes(path, MAX_LOG)
+                    candidate = session_log_candidate(raw)
+                    result["session_log"] = {"status": compare_capture_candidate(candidate, clipboard),
+                                             "new_session_count": 1}
+                    # Do not copy a session trace unless the exact prompt AND
+                    # a completed schema-valid response establish correlation.
+                    if candidate is not None:
+                        write_once(root, folder / "session-log.snapshot", raw)
+                        write_once(root, folder / "session-log.response.txt", candidate)
+                        result["session_log"].update(sha256=digest(raw), bytes=len(raw))
+                except (OSError, ValueError):
+                    result["session_log"] = {"status": "UNREADABLE_OR_OVERSIZED", "new_session_count": 1}
+    result["paired_log_capture_match"] = any(
+        result[k]["status"] in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH")
+        for k in ("cli_log", "session_log")
+    )
+    # One paired trial does not prove unattended completion detection or stability.
+    write_once(root, folder / "log-probe.json", json_bytes(result))
+    return result
+
+
+def guided_run(root, bid, max_calls, *, probe_log=False):
     """Windows-only operator-gated staging. Never presses Enter or retries."""
     if os.name != "nt":
         raise BatchError("INTERACTIVE_WINDOWS_REQUIRED")
@@ -513,6 +658,10 @@ def guided_run(root, bid, max_calls):
     root, base, plan = load_plan(root, bid)
     if max_calls > len(plan["jobs"]):
         raise BatchError("LIMIT_EXCEEDS_PLAN")
+    if probe_log and (max_calls != 1 or len(plan["jobs"]) != 1):
+        raise BatchError("LOG_PROBE_SINGLE_JOB_REQUIRED")
+    if probe_log and "--log-file" not in capability_probe()["flags"]:
+        raise BatchError("LOG_FILE_FLAG_UNAVAILABLE")
     pg, pyperclip = gui_context()
     from tools.agy_media_probe import windows
     initial = report(root, bid)
@@ -532,9 +681,12 @@ def guided_run(root, bid, max_calls):
             if row["status"] != "PENDING" or used >= max_calls:
                 break
             work, media = workspace(root, base, job, plan)
+            folder = base / job["id"]
+            log_path = safe_path(root, folder / ("agy-" + uuid.uuid4().hex + ".log")) if probe_log else None
+            brain_before = fresh_brain_dirs() if probe_log else None
             claim(root, base, job)
             used += 1
-            hwnd = stage_window(root, base, job, plan, pg, pyperclip)
+            hwnd = stage_window(root, base, job, plan, pg, pyperclip, log_path=log_path)
             print("In AGY, verify correct MP4 chip and prompt. Submit once manually.")
             print("Copy only the returned JSON, close AGY, return here and type CAPTURE.")
             started = time.monotonic()
@@ -548,7 +700,16 @@ def guided_run(root, bid, max_calls):
                 raise BatchError("INVALID_CAPTURE_STOP")
             if any(h == hwnd for h, _, _ in windows(pg)):
                 raise BatchError("AGY_WINDOW_STILL_OPEN")
-        return report(root, bid)
+            if probe_log:
+                print("LOG_CAPTURE_PROBE=" + json.dumps(
+                    inspect_capture_sources(root, folder, log_path, brain_before, raw),
+                    ensure_ascii=False, sort_keys=True))
+        result = report(root, bid)
+        if probe_log:
+            probe_path = safe_path(root, base / plan["jobs"][0]["id"] / "log-probe.json")
+            if probe_path.is_file():
+                result["log_probe"] = parse_json(read_bytes(probe_path))
+        return result
     finally:
         lock.unlink()
 
@@ -575,6 +736,7 @@ def main(argv=None):
         if name == "run":
             p.add_argument("--max-calls", type=int, required=True)
             p.add_argument("--authorize-guided", action="store_true")
+            p.add_argument("--probe-log", action="store_true", help="One paired local log/clipboard trial; inspect only the dedicated log and a unique new session")
     try:
         args = parser.parse_args(argv)
         if args.command == "probe":
@@ -594,7 +756,7 @@ def main(argv=None):
         elif args.command == "run":
             if not args.authorize_guided:
                 raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
-            result = guided_run(args.root, args.batch, args.max_calls)
+            result = guided_run(args.root, args.batch, args.max_calls, probe_log=args.probe_log)
         elif args.command == "stage":
             result = stage_only(args.root, args.batch)
         else:

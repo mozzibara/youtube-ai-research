@@ -135,3 +135,26 @@ six models on identical speech, reuse captures for context correction, select
 clip lengths, and only then develop the production pipeline. A fully unattended
 MP4 adapter remains a blocker; do not enable automatic submission based solely
 on help flags or keyboard timing.
+
+### WP1 paired response capture pilot
+
+After the no-submit Windows smoke succeeds, use the same unsubmitted
+single-model synthetic batch for one explicitly authorized call:
+
+    python -m ytresearch.research_batch run --root D:\private-runtime --batch BATCH_ID --authorize-guided --max-calls 1 --probe-log
+
+This opt-in mode adds a unique, private --log-file destination to the same TUI
+launcher. It also snapshots only immediate directory names under the documented
+AGY brain directory before launch, and after closure reads at most the direct
+transcript_full.jsonl in a unique newly created directory. No existing session
+file is opened, no recursive search is performed, and multiple new directories
+are ambiguous. A session candidate requires exactly one matching prompt turn
+and a completed, schema-valid MODEL planner response without recorded tool calls.
+A dedicated CLI log candidate requires a unique terminal SUCCESS result event,
+not debug text or partial deltas. Preserve the actual clipboard capture first.
+Compare the candidates with the clipboard JSON; keep log snapshots and results
+only inside the private batch. A matching pair is evidence for this session,
+not proof of automated completion detection, provider ingress or future stability.
+If neither candidate is available, the pilot still preserves the manual capture;
+do not resubmit just to obtain logs. The operator must copy the response before
+closing AGY and type CAPTURE manually. No automatic Enter or retry.
