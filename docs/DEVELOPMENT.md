@@ -86,6 +86,17 @@ The root must exist outside Git. All real files, captures, plans and reports
 remain private. No additional source assets are searched. This is a trusted local
 operator boundary, not protection against a hostile concurrent filesystem actor.
 
+No-submit Windows smoke, before live experiments:
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-3.8-flash-medium --stage-only
+
+The same mode can be run against an existing unsubmitted plan using the stage
+subcommand with --root and --batch. Type READY only after the correct AGY
+session is visibly ready. The script stages media and prompt, but the operator
+must not submit; verify the chip/prompt, close AGY, and type STAGED. This
+records an operator declaration, not a provider receipt. It consumes no
+submission reservation. The script itself never presses Enter.
+
 Optional guided Windows mode, only for media authorized for provider submission:
 
     python -m ytresearch.research_batch run --root D:\private-runtime --batch BATCH_ID --authorize-guided --max-calls 1
@@ -110,6 +121,8 @@ response was not captured.
 Reports contain aggregate metrics/status, not transcript content. Raw captures
 are immutable and hashed; invalid captures are retained. CER/WER measure
 reference agreement, normalized CER removes whitespace/punctuation only.
+Empty valid responses are scored as complete reference deletions when a
+nonempty reference exists, not silently excluded from quality scoring.
 No automatic numeric equivalence, semantic judgment, human verification or
 quota estimate is fabricated. A nonempty model response is not a quality pass.
 Attempt reservations are not verified billable requests. Wall-clock timing is

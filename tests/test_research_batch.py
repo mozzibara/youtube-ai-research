@@ -49,6 +49,26 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(result["reserved_attempts"], 1)
         self.assertEqual(b.report(root, bid), result)
 
+    def test_unavailable_transcript_counts_as_missing_reference(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        raw = b.json_bytes({"transcript": "", "uncertainties": [], "status": "UNAVAILABLE"})
+        self.assertEqual(b.capture(root, base, job, raw, 1), "CAPTURED")
+        row = b.report(root, bid)["jobs"][0]
+        self.assertFalse(row["transcript_nonempty"])
+        self.assertEqual(row["metrics"]["raw_cer"]["rate"], 1)
+        self.assertEqual(row["metrics"]["raw_wer"]["rate"], 1)
+
+    def test_stage_mode_does_not_route_to_guided(self):
+        with patch.object(b, "prepare", return_value="test"), patch.object(
+                b, "stage_only", return_value={"script_submitted_model_requests": 0}) as stage, patch.object(
+                b, "guided_run", side_effect=AssertionError("live forbidden")):
+            self.assertEqual(b.main(["prepare", "--root", str(self.root),
+                                     "--media", "source.mp4", "--stage-only"]), 0)
+            stage.assert_called_once_with(str(self.root), "test")
+
     def test_invalid_capture_preserved(self):
         bid = self.prepare()
         root, base, plan = b.load_plan(self.root, bid)

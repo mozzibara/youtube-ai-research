@@ -71,7 +71,8 @@ def safe_root(raw):
 
 def safe_path(root, relative):
     rel = Path(relative)
-    if rel.is_absolute() or rel.drive or rel.anchor or ".." in rel.parts or not rel.parts:
+    if (rel.is_absolute() or rel.drive or rel.anchor or ".." in rel.parts
+            or not rel.parts or any(":" in part for part in rel.parts)):
         raise BatchError("RELATIVE_PRIVATE_PATH_REQUIRED")
     p = root / rel
     if any(_is_symlink_or_junction(q) for q in (p, *p.parents)):
@@ -139,6 +140,8 @@ def check_media(path):
         capture_output=True, timeout=30, check=True,
     )
     obj = parse_json(probe.stdout)
+    if "mp4" not in str(obj["format"].get("format_name", "")).split(","):
+        raise BatchError("MP4_CONTAINER_REQUIRED")
     kinds = [s.get("codec_type") for s in obj["streams"]]
     if kinds.count("video") != 1 or kinds.count("audio") != 1 or len(kinds) != 2:
         raise BatchError("SINGLE_VIDEO_AND_AUDIO_REQUIRED")
@@ -200,7 +203,7 @@ def prepare(root, media, reference=None, reference_kind="UNVERIFIED", models=Non
     }
     bid = batch_id(plan)
     base = Path("phase2-batches") / bid
-    # Commit the plan last; partial preparation can resume without overwriting.
+    # Commit the plan last; complete existing copies can be reused. Corrupt copies block.
     for job in plan["jobs"]:
         copy_media(root, base / job["id"] / "media" / "sample.mp4", source, media_hash)
     if ref_raw is not None:
@@ -373,7 +376,7 @@ def report(root, bid):
                 obj = validate_response(raw)
                 row["model_reported_status"] = obj["status"]
                 row["transcript_nonempty"] = bool(obj["transcript"].strip())
-                if reference is not None and obj["transcript"].strip():
+                if reference is not None:
                     row["metrics"] = metrics(reference, obj["transcript"])
             elif receipt["status"] != "INVALID_CAPTURE":
                 raise BatchError("INVALID_RECEIPT_STATUS")
@@ -398,6 +401,109 @@ def claim(root, base, job):
         os.fsync(f.fileno())
 
 
+def gui_context():
+    if os.name != "nt":
+        raise BatchError("INTERACTIVE_WINDOWS_REQUIRED")
+    info = capability_probe()
+    if not (info["agy_available"] and info["windows_terminal_available"]
+            and info["gui_dependencies"] and set(FLAGS) <= set(info["flags"])):
+        raise BatchError("GUIDED_CAPABILITY_PREFLIGHT_FAILED")
+    import pyautogui as pg
+    import pyperclip
+    pg.FAILSAFE = True
+    return pg, pyperclip
+
+
+def stage_window(root, base, job, plan, pg, pyperclip):
+    from tools.agy_media_probe import choose_window, focus, ps_quote, windows
+    work, media = workspace(root, base, job, plan)
+    title = "AGY_WP1_" + uuid.uuid4().hex[:12].upper()
+    launcher = safe_path(root, base / job["id"] / "launch.ps1")
+    exe = shutil.which("agy") or shutil.which("agy.cmd")
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "Set-Location -LiteralPath " + ps_quote(str(work)),
+        "$env:AGY_CLI_DISABLE_AUTO_UPDATE = 'true'",
+        "& " + ps_quote(exe) + " --model " + job["model"]
+        + " --effort " + job["effort"] + " --dangerously-skip-permissions --sandbox",
+    ]
+    create_immutable(launcher, ("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
+    before = {h for h, _, _ in windows(pg)}
+    subprocess.Popen(["wt.exe", "-w", "new", "new-tab", "--title", title,
+                      "--suppressApplicationTitle", "--startingDirectory", str(work),
+                      "powershell.exe", "-NoLogo", "-NoProfile", "-File", str(launcher)],
+                     cwd=work)
+    until = time.monotonic() + 45
+    hwnd = None
+    while time.monotonic() < until:
+        hwnd = choose_window(before, windows(pg), title)
+        if hwnd is not None:
+            break
+        time.sleep(.5)
+    if hwnd is None:
+        raise BatchError("UNIQUE_WINDOW_NOT_FOUND")
+    print(f"{job['id']} {job['model']}: verify AGY is ready and shows the requested model.")
+    if input("Return to this controller and type READY (anything else stops): ").strip() != "READY":
+        raise BatchError("OPERATOR_STOPPED_BEFORE_STAGING")
+
+    def target():
+        matches = [h for h, t, _ in windows(pg) if h == hwnd and title in t]
+        if len(matches) != 1:
+            raise BatchError("WINDOW_IDENTITY_CHANGED")
+        focus(pg, hwnd)
+
+    workspace(root, base, job, plan)
+    helper = Path(__file__).resolve().parents[1] / "tools" / "agy_media_file_drop.ps1"
+    p = subprocess.run(["powershell.exe", "-NoProfile", "-STA", "-File",
+                        str(helper), "-FilePath", str(media)],
+                       capture_output=True, timeout=25)
+    if p.returncode != 0 or b"FILE_DROP_READY" not in p.stdout:
+        raise BatchError("CLIPBOARD_FILE_DROP_FAILED")
+    target()
+    pg.hotkey("alt", "v", interval=.1)
+    time.sleep(3)
+    target()
+    pyperclip.copy(PROMPT)
+    pg.hotkey("ctrl", "v", interval=.1)
+    time.sleep(1)
+    # Clear stale JSON/prompt clipboard; no automated submission.
+    pyperclip.copy("WP1_WAITING_FOR_OPERATOR_CAPTURE_" + title)
+    return hwnd
+
+
+def stage_only(root, bid):
+    """No-submit local smoke. Operator must close AGY without pressing Enter."""
+    root, base, plan = load_plan(root, bid)
+    pg, pyperclip = gui_context()
+    from tools.agy_media_probe import windows
+    lock = safe_path(root, base / "controller.lock")
+    with lock.open("xb") as f:
+        f.write(b"STAGING_CONTROLLER\n")
+    try:
+        current = report(root, bid)
+        if any(r["claim_exists"] for r in current["jobs"]):
+            raise BatchError("STAGE_ONLY_REQUIRES_UNSUBMITTED_PLAN")
+        job = plan["jobs"][0]
+        hwnd = stage_window(root, base, job, plan, pg, pyperclip)
+        print("STAGE ONLY: verify the MP4 chip and prompt. DO NOT SUBMIT.")
+        print("Close AGY without sending a prompt, then return to this controller.")
+        if input("Type STAGED only if correct attachment/prompt observed and NOT submitted: ").strip() != "STAGED":
+            raise BatchError("STAGE_ONLY_NOT_CONFIRMED")
+        if any(h == hwnd for h, _, _ in windows(pg)):
+            raise BatchError("AGY_WINDOW_STILL_OPEN")
+        result = {"batch_id": bid, "job": job["id"],
+                  "operator_declared_chip_and_prompt_visible": True,
+                  "operator_declared_no_submission": True,
+                  "script_submitted_model_requests": 0,
+                  "provider_ingress_verified": False,
+                  "native_headless_media_verified": False,
+                  "automatic_response_capture_verified": False}
+        write_once(root, base / "staging" / (uuid.uuid4().hex + ".json"), json_bytes(result))
+        return result
+    finally:
+        lock.unlink()
+
+
 def guided_run(root, bid, max_calls):
     """Windows-only operator-gated staging. Never presses Enter or retries."""
     if os.name != "nt":
@@ -407,14 +513,8 @@ def guided_run(root, bid, max_calls):
     root, base, plan = load_plan(root, bid)
     if max_calls > len(plan["jobs"]):
         raise BatchError("LIMIT_EXCEEDS_PLAN")
-    info = capability_probe()
-    if not (info["agy_available"] and info["windows_terminal_available"]
-            and info["gui_dependencies"] and set(FLAGS) <= set(info["flags"])):
-        raise BatchError("GUIDED_CAPABILITY_PREFLIGHT_FAILED")
-    import pyautogui as pg
-    import pyperclip
-    from tools.agy_media_probe import choose_window, focus, ps_quote, windows
-    pg.FAILSAFE = True
+    pg, pyperclip = gui_context()
+    from tools.agy_media_probe import windows
     initial = report(root, bid)
     if any(r["status"] in ("BLOCKED_UNSETTLED_CLAIM", "INVALID_CAPTURE") for r in initial["jobs"]):
         raise BatchError("UNRESOLVED_CAPTURE_REQUIRES_REVIEW")
@@ -434,57 +534,7 @@ def guided_run(root, bid, max_calls):
             work, media = workspace(root, base, job, plan)
             claim(root, base, job)
             used += 1
-            title = "AGY_WP1_" + uuid.uuid4().hex[:12].upper()
-            launcher = safe_path(root, base / job["id"] / "launch.ps1")
-            exe = shutil.which("agy") or shutil.which("agy.cmd")
-            lines = [
-                "$ErrorActionPreference = 'Stop'",
-                "Set-Location -LiteralPath " + ps_quote(str(work)),
-                "$env:AGY_CLI_DISABLE_AUTO_UPDATE = 'true'",
-                "& " + ps_quote(exe) + " --model " + job["model"]
-                + " --effort " + job["effort"] + " --dangerously-skip-permissions --sandbox",
-            ]
-            create_immutable(launcher, ("\r\n".join(lines) + "\r\n").encode("utf-8-sig"))
-            before = {h for h, _, _ in windows(pg)}
-            subprocess.Popen(["wt.exe", "-w", "new", "new-tab", "--title", title,
-                              "--suppressApplicationTitle", "--startingDirectory", str(work),
-                              "powershell.exe", "-NoLogo", "-NoProfile", "-File", str(launcher)],
-                             cwd=work)
-            until = time.monotonic() + 45
-            hwnd = None
-            while time.monotonic() < until:
-                hwnd = choose_window(before, windows(pg), title)
-                if hwnd is not None:
-                    break
-                time.sleep(.5)
-            if hwnd is None:
-                raise BatchError("UNIQUE_WINDOW_NOT_FOUND")
-            print(f"{job['id']} {job['model']}: verify AGY is ready and shows the requested model.")
-            if input("Return to this controller and type READY (anything else stops): ").strip() != "READY":
-                raise BatchError("OPERATOR_STOPPED_BEFORE_STAGING")
-
-            def target():
-                matches = [h for h, t, _ in windows(pg) if h == hwnd and title in t]
-                if len(matches) != 1:
-                    raise BatchError("WINDOW_IDENTITY_CHANGED")
-                focus(pg, hwnd)
-
-            workspace(root, base, job, plan)
-            helper = Path(__file__).resolve().parents[1] / "tools" / "agy_media_file_drop.ps1"
-            p = subprocess.run(["powershell.exe", "-NoProfile", "-STA", "-File",
-                                str(helper), "-FilePath", str(media)],
-                               capture_output=True, timeout=25)
-            if p.returncode != 0 or b"FILE_DROP_READY" not in p.stdout:
-                raise BatchError("CLIPBOARD_FILE_DROP_FAILED")
-            target()
-            pg.hotkey("alt", "v", interval=.1)
-            time.sleep(3)
-            target()
-            pyperclip.copy(PROMPT)
-            pg.hotkey("ctrl", "v", interval=.1)
-            time.sleep(1)
-            # Clear stale JSON/prompt clipboard; no automated submission.
-            pyperclip.copy("WP1_WAITING_FOR_OPERATOR_CAPTURE_" + title)
+            hwnd = stage_window(root, base, job, plan, pg, pyperclip)
             print("In AGY, verify correct MP4 chip and prompt. Submit once manually.")
             print("Copy only the returned JSON, close AGY, return here and type CAPTURE.")
             started = time.monotonic()
@@ -514,9 +564,11 @@ def main(argv=None):
     prep.add_argument("--reference-kind", choices=REF_KINDS, default="UNVERIFIED")
     prep.add_argument("--models", choices=list(MODELS), nargs="+")
     prep.add_argument("--trial", default="1")
-    prep.add_argument("--guided", action="store_true")
+    modes = prep.add_mutually_exclusive_group()
+    modes.add_argument("--guided", action="store_true")
+    modes.add_argument("--stage-only", action="store_true")
     prep.add_argument("--max-calls", type=int)
-    for name in ("report", "run"):
+    for name in ("report", "run", "stage"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
         p.add_argument("--batch", required=True)
@@ -533,11 +585,18 @@ def main(argv=None):
             bid = prepare(args.root, args.media, args.reference, args.reference_kind,
                           args.models, args.trial)
             print("BATCH_ID=" + bid, flush=True)
-            result = guided_run(args.root, bid, args.max_calls) if args.guided else report(args.root, bid)
+            if args.guided:
+                result = guided_run(args.root, bid, args.max_calls)
+            elif args.stage_only:
+                result = stage_only(args.root, bid)
+            else:
+                result = report(args.root, bid)
         elif args.command == "run":
             if not args.authorize_guided:
                 raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
             result = guided_run(args.root, args.batch, args.max_calls)
+        elif args.command == "stage":
+            result = stage_only(args.root, args.batch)
         else:
             result = report(args.root, args.batch)
         print(json_bytes(result).decode("utf-8"), end="")
