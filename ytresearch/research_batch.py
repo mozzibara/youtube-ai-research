@@ -328,8 +328,10 @@ def capability_probe():
     return result
 
 
-def capture(root, base, job, raw, elapsed):
-    """Preserve clipboard bytes before parsing. Never replace a previous capture."""
+def capture(root, base, job, raw, elapsed, *, source="DIRECT_TUI_CLIPBOARD"):
+    """Preserve captured bytes before parsing. Never replace a previous capture."""
+    if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT"):
+        raise BatchError("INVALID_CAPTURE_SOURCE")
     folder = base / job["id"]
     claim_path = safe_path(root, folder / "claim.json")
     if not claim_path.is_file():
@@ -344,7 +346,7 @@ def capture(root, base, job, raw, elapsed):
     except BatchError:
         status = "INVALID_CAPTURE"
     receipt = {"response_sha256": digest(raw), "status": status,
-               "capture_source": "DIRECT_TUI_CLIPBOARD",
+               "capture_source": source,
                "original_provider_bytes_verified": False,
                "elapsed_seconds": elapsed,
                "model_identity": "OPERATOR_CHECK_REQUIRED",
@@ -378,6 +380,7 @@ def report(root, bid):
                 raise BatchError("CAPTURE_HASH_MISMATCH")
             row["status"] = receipt["status"]
             row["elapsed_seconds"] = receipt["elapsed_seconds"]
+            row["capture_source"] = receipt.get("capture_source")
             if receipt["status"] == "CAPTURED":
                 obj = validate_response(raw)
                 row["model_reported_status"] = obj["status"]
@@ -420,7 +423,7 @@ def gui_context():
     return pg, pyperclip
 
 
-def stage_window(root, base, job, plan, pg, pyperclip, log_path=None):
+def stage_window(root, base, job, plan, pg, pyperclip, log_path=None, *, return_identity=False):
     from tools.agy_media_probe import choose_window, focus, ps_quote, windows
     work, media = workspace(root, base, job, plan)
     title = "AGY_WP1_" + uuid.uuid4().hex[:12].upper()
@@ -479,7 +482,7 @@ def stage_window(root, base, job, plan, pg, pyperclip, log_path=None):
     time.sleep(1)
     # Clear stale JSON/prompt clipboard; no automated submission.
     pyperclip.copy("WP1_WAITING_FOR_OPERATOR_CAPTURE_" + title)
-    return hwnd
+    return (hwnd, title) if return_identity else hwnd
 
 
 def stage_only(root, bid):
@@ -561,8 +564,41 @@ def fresh_brain_dirs():
     return brain, found
 
 
-def session_log_candidate(raw):
-    """Only one exact prompt turn with a completed final MODEL planner response."""
+def compact_prompt(text):
+    return "".join(unicodedata.normalize("NFC", text).split())
+
+
+def prompt_match(content):
+    if not isinstance(content, str):
+        return None
+    if content.replace("\r\n", "\n").strip() == PROMPT.strip():
+        return "EXACT"
+    expected = compact_prompt(PROMPT)
+    if compact_prompt(content).count(expected) == 1:
+        return "WRAPPED"
+    return None
+
+
+def response_from_content(content):
+    if not isinstance(content, str):
+        return None
+    # Only a complete single JSON document, optionally in one whole code fence.
+    fence = re.fullmatch(r"\s*\x60{3}(?:json)?[ \t]*\r?\n(.*?)\r?\n\x60{3}[ \t]*\s*",
+                         content, re.I | re.S)
+    if fence:
+        content = fence.group(1)
+    raw = content.encode("utf-8")
+    if len(raw) > MAX_TEXT:
+        return None
+    try:
+        validate_response(raw)
+        return raw
+    except (BatchError, UnicodeError, ValueError, TypeError, RecursionError):
+        return None
+
+
+def session_log_candidate(raw, *, live=False):
+    """One correlated turn; wrapped content requires observed media envelope."""
     lines = [line for line in raw.splitlines() if line.strip()]
     if not lines or len(lines) > 10000:
         return None
@@ -573,26 +609,26 @@ def session_log_candidate(raw):
         inputs = [row for row in rows if row.get("type") == "USER_INPUT"]
         if len(inputs) != 1:
             return None
-        prompt = inputs[0].get("content")
-        if not isinstance(prompt, str) or prompt.replace("\r\n", "\n").strip() != PROMPT.strip():
+        user = inputs[0]
+        mode = prompt_match(user.get("content"))
+        if mode is None:
             return None
-        # No unrelated prior turns, incomplete final response, or recorded tool calls.
-        planners = [row for row in rows[rows.index(inputs[0]) + 1:]
+        if live or mode == "WRAPPED":
+            media = user.get("media")
+            if (len(rows) != 2 or rows[0] != user
+                    or user.get("source") != "USER_EXPLICIT"
+                    or user.get("status") != "DONE"
+                    or not isinstance(media, list) or len(media) != 1):
+                return None
+        planners = [row for row in rows[rows.index(user) + 1:]
                     if row.get("type") == "PLANNER_RESPONSE"]
         if not planners or any(row.get("tool_calls") for row in rows):
             return None
         last = planners[-1]
         if last.get("source") != "MODEL" or last.get("status") != "DONE":
             return None
-        content = last.get("content")
-        if not isinstance(content, str):
-            return None
-        candidate = content.encode("utf-8")
-        if len(candidate) > MAX_TEXT:
-            return None
-        validate_response(candidate)
-        return candidate
-    except (BatchError, UnicodeError, ValueError, TypeError):
+        return response_from_content(last.get("content"))
+    except (BatchError, UnicodeError, ValueError, TypeError, RecursionError):
         return None
 
 
@@ -728,10 +764,11 @@ def session_shape(raw, clipboard):
         inc("content_types", type(content).__name__ if type(content) in
             (str, dict, list, type(None), int, bool, float) else "OTHER")
         if isinstance(content, str):
-            if content.replace("\r\n", "\n").strip() == PROMPT.strip():
+            if prompt_match(content) is not None:
                 out["matching_prompt_rows"] += 1
             try:
-                if validate_response(content.encode("utf-8")) == target:
+                candidate = response_from_content(content)
+                if candidate is not None and validate_response(candidate) == target:
                     out["matching_response_rows"] += 1
             except (ValueError, UnicodeError, RecursionError):
                 pass
@@ -1008,6 +1045,135 @@ def guided_run(root, bid, max_calls, *, probe_log=False, probe_session=False):
         lock.unlink()
 
 
+def live_pair(session):
+    """Require both observed trace aliases, identical bytes and a strict live turn."""
+    paths = scoped_session_candidates(session)
+    if len(paths) != 2 or {p.name for p in paths} != {"transcript.jsonl", "transcript_full.jsonl"}:
+        return None
+    try:
+        a, b = (read_bytes(p, MAX_LOG) for p in paths)
+    except OSError:
+        return None
+    if a != b:
+        return None
+    candidate = session_log_candidate(a, live=True)
+    return (a, candidate) if candidate is not None else None
+
+
+def wait_live_pair(before, *, timeout=180, settle=5):
+    """Bounded polling. Stability is a heuristic, not a provider terminal event."""
+    deadline = time.monotonic() + timeout
+    previous = None
+    since = None
+    while time.monotonic() < deadline:
+        after = fresh_brain_dirs()
+        if after is None or after[0] != before[0]:
+            raise BatchError("SESSION_BASELINE_UNAVAILABLE")
+        new = after[1] - before[1]
+        if len(new) > 1:
+            raise BatchError("AMBIGUOUS_NEW_SESSION")
+        pair = None
+        if len(new) == 1:
+            name = next(iter(new))
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
+                raise BatchError("UNSAFE_SESSION_IDENTIFIER")
+            pair = live_pair(after[0] / name)
+        if pair is None:
+            previous = since = None
+        else:
+            key = (name, digest(pair[0]))
+            now = time.monotonic()
+            if key != previous:
+                previous, since = key, now
+            elif now - since >= settle:
+                return pair
+        time.sleep(1)
+    raise BatchError("LIVE_CAPTURE_TIMEOUT_NO_RETRY")
+
+
+def close_pilot_window(pg, hwnd, title):
+    """Close only the unique newly created terminal. Never kill or approve dialogs."""
+    from tools.agy_media_probe import windows
+    matches = [(h, t, w) for h, t, w in windows(pg) if h == hwnd]
+    if not matches:
+        return "ALREADY_CLOSED"
+    if len(matches) != 1 or matches[0][1] != title:
+        return "MANUAL_CLOSE_REQUIRED"
+    try:
+        matches[0][2].close()
+    except Exception:
+        return "MANUAL_CLOSE_REQUIRED"
+    return "CLOSED" if wait_window_closed(pg, hwnd) else "MANUAL_CLOSE_REQUIRED"
+
+
+def paired_pilot_gate(root, bid, media_hash):
+    root, base, plan = load_plan(root, bid)
+    if len(plan["jobs"]) != 1 or plan["media_sha256"] != media_hash:
+        raise BatchError("PAIRED_PILOT_MEDIA_MISMATCH")
+    folder = base / plan["jobs"][0]["id"]
+    summary = report(root, bid)
+    if summary["jobs"][0]["status"] != "CAPTURED":
+        raise BatchError("PAIRED_CAPTURE_REQUIRED")
+    clipboard = read_bytes(safe_path(root, folder / "response.txt"))
+    receipt = parse_json(read_bytes(safe_path(root, folder / "receipt.json")))
+    if receipt.get("capture_source") != "DIRECT_TUI_CLIPBOARD":
+        raise BatchError("PAIRED_CLIPBOARD_REQUIRED")
+    trace = read_bytes(safe_path(root, folder / "recovered-session.snapshot"), MAX_LOG)
+    candidate = session_log_candidate(trace, live=True)
+    if compare_capture_candidate(candidate, clipboard) not in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
+        raise BatchError("PAIRED_SESSION_MATCH_REQUIRED")
+
+
+def live_session_pilot(root, bid, paired_bid, max_calls):
+    """One authorized manual submission; automatic capture and targeted close."""
+    if os.name != "nt" or max_calls != 1:
+        raise BatchError("LIVE_PILOT_SINGLE_WINDOWS_CALL_REQUIRED")
+    root, base, plan = load_plan(root, bid)
+    if len(plan["jobs"]) != 1 or bid == paired_bid:
+        raise BatchError("LIVE_PILOT_NEW_SINGLE_JOB_REQUIRED")
+    paired_pilot_gate(root, paired_bid, plan["media_sha256"])
+    pg, pyperclip = gui_context()
+    lock = safe_path(root, base / "controller.lock")
+    with lock.open("xb") as f:
+        f.write(b"LIVE_SESSION_PILOT\n")
+    try:
+        current = report(root, bid)
+        if current["jobs"][0]["status"] == "CAPTURED":
+            return current
+        if current["reserved_attempts"]:
+            raise BatchError("UNSETTLED_CLAIM_NO_RETRY")
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        workspace(root, base, job, plan)
+        before = persist_session_baseline(root, folder)
+        claim(root, base, job)
+        hwnd, title = stage_window(root, base, job, plan, pg, pyperclip, return_identity=True)
+        print("Verify the MP4 chip and prompt. Press Enter ONCE in AGY. No copy or close needed.", flush=True)
+        print("Do not start other AGY sessions. On timeout do not resubmit.", flush=True)
+        started = time.monotonic()
+        trace, raw = wait_live_pair(before)
+        write_once(root, folder / "live-session.snapshot", trace)
+        status = capture(root, base, job, raw, time.monotonic() - started,
+                         source="SESSION_TRACE_PILOT")
+        if status != "CAPTURED":
+            raise BatchError("LIVE_CAPTURE_INVALID_NO_RETRY")
+        close_status = close_pilot_window(pg, hwnd, title)
+        evidence = {"capture_source": "SESSION_TRACE_PILOT",
+                    "automatic_session_extraction_observed": True,
+                    "completion_evidence": "TWO_IDENTICAL_DONE_TRACES_STABLE_5S",
+                    "provider_terminal_event_verified": False,
+                    "provider_ingress_verified": False,
+                    "script_submitted_model_requests": 0,
+                    "session_sha256": digest(trace),
+                    "window_close_status": close_status}
+        write_once(root, folder / "live-pilot.json", json_bytes(evidence))
+        result = report(root, bid)
+        result["live_pilot"] = evidence
+        return result
+    finally:
+        lock.unlink()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1024,6 +1190,8 @@ def main(argv=None):
     modes.add_argument("--stage-only", action="store_true")
     prep.add_argument("--max-calls", type=int)
     prep.add_argument("--probe-session", action="store_true")
+    prep.add_argument("--live-session", action="store_true")
+    prep.add_argument("--paired-batch")
     for name in ("report", "run", "stage", "recover-log", "recover-session"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
@@ -1039,6 +1207,9 @@ def main(argv=None):
         if args.command == "probe":
             result = capability_probe()
         elif args.command == "prepare":
+            if args.live_session != bool(args.paired_batch) or (args.live_session and
+                    (not args.guided or args.max_calls != 1 or args.probe_session)):
+                raise BatchError("LIVE_SESSION_REQUIRES_GUIDED_SINGLE_AND_PAIRED_BATCH")
             if args.probe_session and (not args.guided or args.max_calls != 1):
                 raise BatchError("SESSION_PROBE_REQUIRES_GUIDED_SINGLE_JOB")
             if args.guided != (args.max_calls is not None):
@@ -1046,7 +1217,9 @@ def main(argv=None):
             bid = prepare(args.root, args.media, args.reference, args.reference_kind,
                           args.models, args.trial)
             print("BATCH_ID=" + bid, flush=True)
-            if args.guided:
+            if args.live_session:
+                result = live_session_pilot(args.root, bid, args.paired_batch, args.max_calls)
+            elif args.guided:
                 result = guided_run(args.root, bid, args.max_calls, probe_session=args.probe_session)
                 if args.probe_session:
                     result["session_probe"] = recover_session(args.root, bid, operator_closed=True)

@@ -219,3 +219,32 @@ a misleading score. Earlier diagnostic scores with an empty normalized
 reference are invalid, not an ASR failure. Preserve the old diagnostic
 artifact. The historical synthetic reference remains a proxy, not human
 listening evidence.
+
+### Session content wrapper and one-call live capture pilot
+
+Observed local traces store the user prompt inside additional text and the
+MODEL response in one Markdown JSON fence. The parser accepts a unique
+whitespace-normalized prompt inclusion only for a two-row USER_EXPLICIT/DONE
+turn with one media record and one MODEL/DONE planner response, with no
+recorded tool calls. It unwraps only a complete single code fence; it never
+extracts arbitrary embedded JSON or accepts trailing commentary. Recovery
+still requires equality to the preserved clipboard JSON.
+
+A separate opt-in single-call pilot (same media hash as a paired recovery)
+requires the existing recovered trace to match its clipboard capture before
+launch. It reserves one possible submission and persists a private session
+baseline. The operator verifies the model, types READY, verifies the actual
+attachment/prompt, and presses Enter once. The script never submits a prompt.
+It polls only the unique new session for both identical known traces and a
+schema-valid two-row completed turn stable for five seconds; saves the
+trace and parsed response with a distinct capture-source receipt; then asks
+only the uniquely titled newly created window to close. It never kills
+processes or approves dialogs. A timeout, ambiguity, or unsettled claim
+blocks retry. DONE plus stability is a pilot heuristic, not proof of a
+provider terminal event, media ingress, or production unattended operation.
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-4-hydrogen-high --trial live-pilot-1 --guided --max-calls 1 --live-session --paired-batch PAIRED_BATCH_ID
+
+Do not start other AGY sessions during this pilot. If a close confirmation
+dialog remains, close only the experiment window manually. Existing capture
+is preserved. No raw trace, identifier or transcript is printed in reports.

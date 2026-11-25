@@ -320,6 +320,58 @@ class ResearchBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(b.BatchError, "REFERENCE_HAS_NO_NORMALIZED_CONTENT"):
             b.metrics("??? ???", "alpha")
 
+    def test_observed_wrapper_and_fence_strict_live_contract(self):
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        user = {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE",
+                "content":"synthetic wrapper\n"+b.PROMPT+"\nmetadata", "media":[{}]}
+        model = {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE",
+                 "content":"\x60\x60\x60json\n"+raw.decode()+"\n\x60\x60\x60"}
+        encode = lambda: b"\n".join(json.dumps(row).encode() for row in (user, model))
+        self.assertEqual(b.session_log_candidate(encode(), live=True), raw)
+        self.assertEqual(b.session_log_candidate(encode()), raw)
+        user["media"] = []
+        self.assertIsNone(b.session_log_candidate(encode(), live=True))
+        user["media"] = [{}]
+        model["content"] += "\nextra"
+        self.assertIsNone(b.session_log_candidate(encode()))
+        model["content"] = raw.decode()
+        user["content"] = b.PROMPT + b.PROMPT
+        self.assertIsNone(b.session_log_candidate(encode(), live=True))
+
+    def test_live_pair_requires_both_identical_and_done(self):
+        session = self.root / "session"
+        session.mkdir()
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        user = {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE",
+                "content":b.PROMPT,"media":[{}]}
+        model = {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}
+        trace = b"\n".join(json.dumps(row).encode() for row in (user, model))
+        (session / "transcript_full.jsonl").write_bytes(trace)
+        self.assertIsNone(b.live_pair(session))
+        (session / "transcript.jsonl").write_bytes(trace)
+        self.assertEqual(b.live_pair(session), (trace, raw))
+        (session / "transcript.jsonl").write_bytes(trace+b"\n")
+        self.assertIsNone(b.live_pair(session))
+        model["status"] = "ACTIVE"
+        trace = b"\n".join(json.dumps(row).encode() for row in (user, model))
+        for name in ("transcript.jsonl","transcript_full.jsonl"):
+            (session / name).write_bytes(trace)
+        self.assertIsNone(b.live_pair(session))
+
+    def test_live_capture_receipt_distinguishes_source(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        raw = b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        b.capture(root, base, job, raw, 1, source="SESSION_TRACE_PILOT")
+        self.assertEqual(b.report(root, bid)["jobs"][0]["capture_source"], "SESSION_TRACE_PILOT")
+
+    def test_live_requires_explicit_paired_batch(self):
+        with patch.object(b,"live_session_pilot",side_effect=AssertionError("live forbidden")):
+            self.assertEqual(b.main(["prepare","--root",str(self.root),"--media","source.mp4",
+                                     "--guided","--max-calls","1","--live-session"]), 2)
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
