@@ -198,3 +198,24 @@ remain for this pilot only. Session comparison runs after closure and can be
 recovered without resubmission. Only allowlisted schema counts are reported;
 raw trace is retained privately only after prompt/response correlation.
 A paired match does not establish autonomous completion or speech accuracy.
+
+### Nested session traces and UTF-8 evaluation
+
+Local AGY 1.5.16 inventory revealed transcript.jsonl and transcript_full.jsonl
+two levels below the uniquely identified session directory. Recovery now
+searches only that correlated directory, at most depth two and 500 entries,
+for the two exact known filenames. It reads at most two bounded traces,
+rejects reparse points and conflicting candidate contents, and requires
+strict prompt/final-response correlation with the preserved clipboard JSON.
+Identical file length is not identity; hashes and parsed response agreement
+are reported. Structural counts are private-safe and do not expose trace
+text. Existing direct-file recovery remains supported. No new model call is
+required. Use recover-session with the existing batch and --confirm-closed.
+
+Reference evaluation must read approved UTF-8 files directly, not non-ASCII
+Python literals piped through Windows PowerShell's default native encoding.
+A reference with no normalized characters is rejected instead of producing
+a misleading score. Earlier diagnostic scores with an empty normalized
+reference are invalid, not an ASR failure. Preserve the old diagnostic
+artifact. The historical synthetic reference remains a proxy, not human
+listening evidence.

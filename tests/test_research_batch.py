@@ -283,6 +283,43 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "NO_CORRELATED_SESSION")
         self.assertEqual(result["candidate_logs_read"], 0)
 
+    def test_nested_duplicate_session_logs_are_not_ambiguous(self):
+        session = self.root / "session"
+        nested = session / "a" / "b"
+        nested.mkdir(parents=True)
+        folder = Path("private-job")
+        raw = b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        trace = b"\n".join(json.dumps(row).encode() for row in (
+            {"type":"USER_INPUT","content":b.PROMPT},
+            {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}))
+        for name in ("transcript.jsonl","transcript_full.jsonl"):
+            (nested / name).write_bytes(trace)
+        result = b.compare_scoped_session(self.root, folder, session, raw, fresh=True)
+        self.assertEqual(result["candidate_logs_read"], 2)
+        self.assertTrue(result["candidate_hashes_equal"])
+        self.assertTrue(result["paired_log_capture_match"])
+        self.assertEqual(result["candidates"][0]["depth"], 2)
+
+    def test_nested_conflicting_session_logs_fail_closed(self):
+        session = self.root / "session"
+        nested = session / "a" / "b"
+        nested.mkdir(parents=True)
+        raw = b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        trace = b"\n".join(json.dumps(row).encode() for row in (
+            {"type":"USER_INPUT","content":b.PROMPT},
+            {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}))
+        (nested / "transcript_full.jsonl").write_bytes(trace)
+        (nested / "transcript.jsonl").write_bytes(b"not matching")
+        folder = Path("private-job")
+        result = b.compare_scoped_session(self.root, folder, session, raw, fresh=True)
+        self.assertEqual(result["status"], "AMBIGUOUS_TRACE_CONTENT")
+        self.assertFalse(result["paired_log_capture_match"])
+        self.assertFalse((self.root / folder / "recovered-session.snapshot").exists())
+
+    def test_metrics_reject_empty_normalized_reference(self):
+        with self.assertRaisesRegex(b.BatchError, "REFERENCE_HAS_NO_NORMALIZED_CONTENT"):
+            b.metrics("??? ???", "alpha")
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

@@ -281,6 +281,8 @@ def normalized(text):
 
 
 def metrics(reference, response):
+    if not normalized(reference):
+        raise BatchError("REFERENCE_HAS_NO_NORMALIZED_CONTENT")
     return {
         "raw_cer": error_rate(reference, response),
         "raw_wer": error_rate(reference.split(), response.split()),
@@ -738,6 +740,73 @@ def session_shape(raw, clipboard):
     return out
 
 
+def scoped_session_candidates(session):
+    """Bounded lookup of two known filenames in one correlated directory."""
+    if any(_is_symlink_or_junction(p) for p in (session, *session.parents)):
+        raise BatchError("UNSAFE_SESSION_PATH")
+    if not session.is_dir():
+        return []
+    candidates = []
+    entries = 0
+    for current, dirs, files in os.walk(session, followlinks=False):
+        current = Path(current)
+        depth = len(current.relative_to(session).parts)
+        entries += len(dirs) + len(files)
+        if entries > 500:
+            raise BatchError("SESSION_INVENTORY_LIMIT")
+        dirs[:] = sorted(n for n in dirs if depth < 2
+                         and not _is_symlink_or_junction(current / n))
+        for name in sorted(files):
+            if name not in ("transcript_full.jsonl", "transcript.jsonl"):
+                continue
+            p = current / name
+            if any(_is_symlink_or_junction(q) for q in (p, *p.parents)):
+                raise BatchError("UNSAFE_SESSION_PATH")
+            if p.is_file():
+                candidates.append(p)
+    if len(candidates) > 2:
+        raise BatchError("AMBIGUOUS_TRACE")
+    return sorted(candidates, key=lambda p: (p.name != "transcript_full.jsonl", str(p)))
+
+
+def compare_scoped_session(root, folder, session, clipboard, *, fresh):
+    paths = scoped_session_candidates(session)
+    result = {"status": "CORRELATED_SESSION_FILE_MISSING",
+              "candidate_count": len(paths), "candidate_logs_read": 0,
+              "paired_log_capture_match": False}
+    if not paths:
+        return result
+    records = []
+    for path in paths:
+        raw = read_bytes(path, MAX_LOG)
+        response = session_log_candidate(raw)
+        match = compare_capture_candidate(response, clipboard)
+        records.append((raw, response, match))
+        result["candidate_logs_read"] += 1
+    result["candidate_hashes_equal"] = len({digest(r[0]) for r in records}) == 1 if len(records) > 1 else None
+    matches = ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH")
+    # Require every candidate to agree; never silently select a conflicting log.
+    if all(r[2] in matches for r in records):
+        raw, response, match = records[0]
+        result["status"] = match
+        result["paired_log_capture_match"] = True
+        result["session_sha256"] = digest(raw)
+        write_once(root, folder / "recovered-session.snapshot", raw)
+        write_once(root, folder / "recovered-session.response.txt", response)
+    elif len(records) > 1 and not result["candidate_hashes_equal"]:
+        result["status"] = "AMBIGUOUS_TRACE_CONTENT"
+    else:
+        result["status"] = records[0][2]
+    if fresh or result["paired_log_capture_match"]:
+        result["candidates"] = [
+            {"filename": path.name, "depth": len(path.parent.relative_to(session).parts),
+             "sha256": digest(raw), "bytes": len(raw), "status": match,
+             "shape": session_shape(raw, clipboard)}
+            for path, (raw, _, match) in zip(paths, records)]
+        result["shape"] = result["candidates"][0]["shape"]
+    return result
+
+
 def recover_session(root, bid, *, operator_closed):
     """Use persisted new-session baseline or a unique explicit historical ID."""
     if not operator_closed:
@@ -792,30 +861,11 @@ def recover_session(root, bid, *, operator_closed):
                     candidate = next(iter(ids))
                     result["correlation"] = "EXPLICIT_ID_IN_DEDICATED_LOG"
         if candidate is not None and brain is not None:
-            # Single basename, no traversal, no symlinks/junctions, no recursive search.
+            # Single basename; bounded search only inside that one correlated session.
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", candidate):
                 raise BatchError("UNSAFE_SESSION_IDENTIFIER")
-            trace = brain / candidate / "transcript_full.jsonl"
-            if any(_is_symlink_or_junction(p) for p in (trace, *trace.parents)):
-                raise BatchError("UNSAFE_SESSION_PATH")
-            if trace.is_file():
-                raw = read_bytes(trace, MAX_LOG)
-                result["candidate_logs_read"] = 1
-                response = session_log_candidate(raw)
-                match = compare_capture_candidate(response, clipboard)
-                result["status"] = match
-                # Historical correlation is weaker; expose structure only if
-                # the response/prompt establishes correlation, or the new
-                # directory was identified from the persisted baseline.
-                if match in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
-                    result["paired_log_capture_match"] = True
-                    write_once(root, folder / "recovered-session.snapshot", raw)
-                    write_once(root, folder / "recovered-session.response.txt", response)
-                    result["session_sha256"] = digest(raw)
-                if result["paired_log_capture_match"] or baseline.exists():
-                    result["shape"] = session_shape(raw, clipboard)
-            else:
-                result["status"] = "CORRELATED_SESSION_FILE_MISSING"
+            result.update(compare_scoped_session(root, folder, brain / candidate,
+                                                 clipboard, fresh=baseline.exists()))
         encoded = json_bytes(result)
         write_once(root, folder / ("session-recovery-" + digest(encoded)[:24] + ".json"), encoded)
         return result
