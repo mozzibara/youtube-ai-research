@@ -17,7 +17,8 @@ import unicodedata
 import uuid
 
 from .manual_verbatim import (
-    _is_symlink_or_junction, _validate_runtime_root, create_immutable, sha,
+    _is_symlink_or_junction, _validate_runtime_root, _load_validated_context,
+    create_immutable, sha,
 )
 
 MODELS = {
@@ -195,7 +196,7 @@ def prepare(root, media, reference=None, reference_kind="UNVERIFIED", models=Non
     ref_raw = None
     if reference is not None:
         ref_raw = read_bytes(safe_path(root, reference))
-        if not ref_raw.decode("utf-8-sig").strip():
+        if not normalized(ref_raw.decode("utf-8-sig")):
             raise BatchError("NONEMPTY_REFERENCE_REQUIRED")
     plan = {
         "schema": SCHEMA, "trial": trial, "media_sha256": media_hash,
@@ -1174,6 +1175,235 @@ def live_session_pilot(root, bid, paired_bid, max_calls):
         lock.unlink()
 
 
+def validate_live_proofs(root, paired_bid, pilot_bid):
+    """Historical capability evidence, not proof of a future clip or model."""
+    root, base, plan = load_plan(root, pilot_bid)
+    if len(plan["jobs"]) != 1 or pilot_bid == paired_bid:
+        raise BatchError("LIVE_PROOF_SINGLE_JOB_REQUIRED")
+    paired_pilot_gate(root, paired_bid, plan["media_sha256"])
+    row = report(root, pilot_bid)["jobs"][0]
+    folder = base / plan["jobs"][0]["id"]
+    if row["status"] != "CAPTURED" or row["capture_source"] != "SESSION_TRACE_PILOT":
+        raise BatchError("LIVE_PROOF_CAPTURE_REQUIRED")
+    evidence = parse_json(read_bytes(safe_path(root, folder / "live-pilot.json")))
+    trace = read_bytes(safe_path(root, folder / "live-session.snapshot"), MAX_LOG)
+    response = read_bytes(safe_path(root, folder / "response.txt"))
+    if (evidence.get("session_sha256") != digest(trace)
+            or evidence.get("automatic_session_extraction_observed") is not True
+            or evidence.get("completion_evidence") != "TWO_IDENTICAL_DONE_TRACES_STABLE_5S"
+            or evidence.get("window_close_status") != "CLOSED"
+            or compare_capture_candidate(session_log_candidate(trace, live=True), response)
+            not in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH")):
+        raise BatchError("LIVE_PROOF_INVALID")
+    return {"paired_batch": paired_bid, "pilot_batch": pilot_bid,
+            "pilot_session_sha256": digest(trace)}
+
+
+def caption_proxy_window(raw, start, seconds):
+    """Intersecting caption events, in source order; no caption text sent to AGY."""
+    obj = parse_json(raw)
+    events = obj.get("events") if isinstance(obj, dict) else None
+    if not isinstance(events, list):
+        raise BatchError("CAPTION_EVENTS_INVALID")
+    left, right = start * 1000, (start + seconds) * 1000
+    parts = []
+    boundary = 0
+    for event in events:
+        if not isinstance(event, dict) or not isinstance(event.get("segs"), list):
+            continue
+        t, duration = event.get("tStartMs"), event.get("dDurationMs")
+        if type(t) is not int or type(duration) is not int or duration <= 0:
+            continue
+        end = t + duration
+        if t >= right or end <= left:
+            continue
+        segments = event["segs"]
+        if any(not isinstance(s, dict) or not isinstance(s.get("utf8", ""), str) for s in segments):
+            raise BatchError("CAPTION_SEGMENT_INVALID")
+        text = "".join(s.get("utf8", "") for s in segments).strip()
+        if text:
+            parts.append(text)
+            boundary += int(t < left or end > right)
+    return "\n".join(parts), {"caption_events": len(parts), "boundary_events": boundary,
+                              "scope": "OVERLAPPING_EVENTS_UNREVIEWED_NOT_VERBATIM_TRUTH"}
+
+
+def prepare_lecture(root, source_root, manifest, start, seconds, models=None, trial="lecture-1"):
+    """Read only an explicitly supplied prior private manifest and its validated assets."""
+    if type(start) is not int or not 0 <= start <= 86400 or type(seconds) is not int or not 30 <= seconds <= 120:
+        raise BatchError("LECTURE_WINDOW_OUT_OF_RANGE")
+    root = safe_root(root)
+    source_root = safe_root(source_root)
+    manifest = safe_path(source_root, manifest)
+    ctx = _load_validated_context(source_root, manifest)
+    source = ctx.found["primary_video"]
+    audio = ctx.found.get("audio")
+    profile = {"schema": "wp2_lecture_clip_v1", "source_assets": ctx.validated_assets,
+               "start_seconds": start, "duration_seconds": seconds,
+               "video": "H264_640x360_1FPS", "audio": "AAC_16000_MONO_64K"}
+    clipdir = Path("lecture-clips") / digest(json_bytes(profile))[:24]
+    target_rel = clipdir / "sample.mp4"
+    target = safe_path(root, target_rel)
+    meta_path = safe_path(root, clipdir / "clip.json")
+    if target.exists() or meta_path.exists():
+        if not target.is_file() or not meta_path.is_file():
+            raise BatchError("INCOMPLETE_LECTURE_CLIP_NO_OVERWRITE")
+        meta = parse_json(read_bytes(meta_path))
+        if meta.get("profile") != profile or sha(target) != meta.get("media_sha256"):
+            raise BatchError("LECTURE_CLIP_HASH_MISMATCH")
+    else:
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise BatchError("FFMPEG_REQUIRED")
+        # Bounded, new output; do not modify source assets or reuse arbitrary clips.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target.parent) as tmp:
+            candidate = Path(tmp) / "sample.mp4"
+            cmd = [ffmpeg, "-nostdin", "-v", "error", "-xerror", "-ss", str(start),
+                   "-i", str(source)]
+            if audio is not None:
+                cmd += ["-ss", str(start), "-i", str(audio)]
+            cmd += ["-t", str(seconds), "-map", "0:v:0",
+                    "-map", "1:a:0" if audio is not None else "0:a:0",
+                    "-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=1",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23",
+                    "-c:a", "aac", "-ar", "16000", "-ac", "1", "-b:a", "64k",
+                    "-movflags", "+faststart", str(candidate)]
+            subprocess.run(cmd, capture_output=True, timeout=240, check=True)
+            metadata = check_media(candidate)
+            if abs(metadata["duration_seconds"] - seconds) > 1.1:
+                raise BatchError("LECTURE_CLIP_DURATION_MISMATCH")
+            media_hash = sha(candidate)
+            copy_media(root, target_rel, candidate, media_hash)
+            write_once(root, clipdir / "clip.json",
+                       json_bytes({"profile": profile, "media_sha256": media_hash}))
+    reference_rel = None
+    caption_info = {"scope": "NO_CAPTION_REFERENCE"}
+    caption = ctx.found.get("subtitle_json3")
+    if caption is not None:
+        caption_raw = read_bytes(caption, MAX_LOG)
+        if digest(caption_raw) != ctx.validated_assets["subtitle_json3"]["sha256"]:
+            raise BatchError("CAPTION_HASH_MISMATCH")
+        text, caption_info = caption_proxy_window(caption_raw, start, seconds)
+        if normalized(text):
+            reference_rel = clipdir / "reference.txt"
+            write_once(root, reference_rel, text.encode("utf-8"))
+    bid = prepare(root, target_rel, reference_rel,
+                  "CAPTION_PROXY" if reference_rel else "UNVERIFIED", models, trial)
+    metadata = {"batch_id": bid, "clip_sha256": sha(target), "start_seconds": start,
+                "duration_seconds": seconds, "caption_proxy": caption_info,
+                "source_manifest_assets_verified": True, "human_reference_verified": False,
+                "model_requests": 0}
+    write_once(root, Path("phase2-batches") / bid / "lecture-source.json", json_bytes(metadata))
+    return bid, metadata
+
+
+def live_job(root, base, plan, job, pg, pyperclip):
+    folder = base / job["id"]
+    workspace(root, base, job, plan)
+    before = persist_session_baseline(root, folder)
+    claim(root, base, job)
+    hwnd, title = stage_window(root, base, job, plan, pg, pyperclip, return_identity=True)
+    print("Verify the MP4 chip and prompt. Press Enter ONCE in AGY. No copy or close needed.", flush=True)
+    print("Do not start other AGY sessions. On timeout do not resubmit.", flush=True)
+    started = time.monotonic()
+    trace, raw = wait_live_pair(before, timeout=600)
+    write_once(root, folder / "live-session.snapshot", trace)
+    status = capture(root, base, job, raw, time.monotonic() - started,
+                     source="SESSION_TRACE_PILOT")
+    if status != "CAPTURED":
+        raise BatchError("LIVE_CAPTURE_INVALID_NO_RETRY")
+    close_status = close_pilot_window(pg, hwnd, title)
+    evidence = {"capture_source": "SESSION_TRACE_PILOT",
+                "automatic_session_extraction_observed": True,
+                "completion_evidence": "TWO_IDENTICAL_DONE_TRACES_STABLE_5S",
+                "provider_terminal_event_verified": False,
+                "provider_ingress_verified": False,
+                "script_submitted_model_requests": 0,
+                "session_sha256": digest(trace),
+                "window_close_status": close_status}
+    write_once(root, folder / "live-pilot.json", json_bytes(evidence))
+    return evidence
+
+
+def completed_live_job(root, base, job, row, *, confirm_closed=False):
+    """Validate saved capture before reuse; never resubmit a claimed job."""
+    if row["status"] != "CAPTURED" or row.get("capture_source") != "SESSION_TRACE_PILOT":
+        raise BatchError("UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY")
+    folder = base / job["id"]
+    trace = read_bytes(safe_path(root, folder / "live-session.snapshot"), MAX_LOG)
+    response = read_bytes(safe_path(root, folder / "response.txt"))
+    if compare_capture_candidate(session_log_candidate(trace, live=True), response) not in (
+            "EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
+        raise BatchError("LIVE_CAPTURE_TRACE_MISMATCH")
+    evidence = parse_json(read_bytes(safe_path(root, folder / "live-pilot.json")))
+    if evidence.get("session_sha256") != digest(trace):
+        raise BatchError("LIVE_TRACE_HASH_MISMATCH")
+    if evidence.get("window_close_status") not in ("CLOSED", "ALREADY_CLOSED") and not confirm_closed:
+        raise BatchError("PREVIOUS_WINDOW_CLOSE_CONFIRMATION_REQUIRED")
+    return evidence
+
+
+def is_windows():
+    return os.name == "nt"
+
+
+def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=False):
+    """Sequential, bounded research run; user still verifies and submits each job."""
+    if not is_windows() or not 1 <= max_calls <= len(MODELS):
+        raise BatchError("LIVE_BATCH_WINDOWS_AND_LIMIT_REQUIRED")
+    root, base, plan = load_plan(root, bid)
+    if bid in (paired_bid, pilot_bid) or max_calls > len(plan["jobs"]):
+        raise BatchError("LIVE_BATCH_LIMIT_OR_ID_INVALID")
+    proofs = validate_live_proofs(root, paired_bid, pilot_bid)
+    if capability_probe()["version"] != "1.5.16":
+        raise BatchError("AGY_VERSION_CHANGED_REVALIDATE")
+    pg, pyperclip = gui_context()
+    # Serialize this batch mode across the private research root.
+    global_lock = safe_path(root, Path("phase2-batches") / "live-controller.lock")
+    with global_lock.open("xb") as f:
+        f.write(b"LIVE_BATCH_CONTROLLER\n")
+    lock = safe_path(root, base / "controller.lock")
+    try:
+        with lock.open("xb") as f:
+            f.write(b"LIVE_BATCH_CONTROLLER\n")
+        try:
+            summary = report(root, bid)
+            if summary["reserved_attempts"] > max_calls:
+                raise BatchError("EXISTING_RESERVATIONS_EXCEED_LIMIT")
+            # Fail closed on any previous ambiguous attempt, including later jobs.
+            for job, row in zip(plan["jobs"], summary["jobs"]):
+                if row["claim_exists"]:
+                    completed_live_job(root, base, job, row, confirm_closed=confirm_closed)
+            for job, row in zip(plan["jobs"], summary["jobs"]):
+                if not row["claim_exists"]:
+                    workspace(root, base, job, plan)
+            used = summary["reserved_attempts"]
+            new_count = 0
+            for job, row in zip(plan["jobs"], summary["jobs"]):
+                if row["claim_exists"]:
+                    continue
+                if used >= max_calls:
+                    break
+                evidence = live_job(root, base, plan, job, pg, pyperclip)
+                used += 1
+                new_count += 1
+                print("LIVE_JOB_CAPTURED=" + job["id"], flush=True)
+                if evidence["window_close_status"] not in ("CLOSED", "ALREADY_CLOSED"):
+                    print("MANUAL_CLOSE_REQUIRED_STOPPING_BATCH", flush=True)
+                    break
+            result = report(root, bid)
+            result["live_batch"] = {"proofs": proofs, "new_captured_jobs": new_count,
+                                    "attempt_limit": max_calls, "script_submitted_model_requests": 0,
+                                    "fully_unattended": False,
+                                    "provider_terminal_event_verified": False}
+            return result
+        finally:
+            lock.unlink()
+    finally:
+        global_lock.unlink()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1192,6 +1422,23 @@ def main(argv=None):
     prep.add_argument("--probe-session", action="store_true")
     prep.add_argument("--live-session", action="store_true")
     prep.add_argument("--paired-batch")
+    lecture = sub.add_parser("lecture-batch")
+    lecture.add_argument("--root", required=True)
+    lecture.add_argument("--source-root", required=True)
+    lecture.add_argument("--manifest", required=True)
+    lecture.add_argument("--start-seconds", type=int, default=60)
+    lecture.add_argument("--duration-seconds", type=int, default=60)
+    lecture.add_argument("--models", choices=list(MODELS), nargs="+")
+    lecture.add_argument("--trial", default="lecture-1")
+    resume = sub.add_parser("live-batch")
+    resume.add_argument("--root", required=True)
+    resume.add_argument("--batch", required=True)
+    for p in (lecture, resume):
+        p.add_argument("--paired-batch", required=True)
+        p.add_argument("--pilot-batch", required=True)
+        p.add_argument("--max-calls", type=int, required=True)
+        p.add_argument("--authorize-guided", action="store_true")
+        p.add_argument("--confirm-previous-closed", action="store_true")
     for name in ("report", "run", "stage", "recover-log", "recover-session"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
@@ -1206,6 +1453,24 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command in ("lecture-batch", "live-batch"):
+            if not args.authorize_guided:
+                raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
+            if not 1 <= args.max_calls <= len(MODELS):
+                raise BatchError("INVALID_TOTAL_ATTEMPT_LIMIT")
+            if args.command == "lecture-batch":
+                if args.max_calls > len(args.models or MODELS):
+                    raise BatchError("LIMIT_EXCEEDS_PLAN")
+                validate_live_proofs(args.root, args.paired_batch, args.pilot_batch)
+                bid, source_info = prepare_lecture(
+                    args.root, args.source_root, args.manifest, args.start_seconds,
+                    args.duration_seconds, args.models, args.trial)
+                print("BATCH_ID=" + bid, flush=True)
+                print("LECTURE_PREPARED=" + json.dumps(source_info, sort_keys=True), flush=True)
+            else:
+                bid = args.batch
+            result = live_batch(args.root, bid, args.paired_batch, args.pilot_batch,
+                                args.max_calls, confirm_closed=args.confirm_previous_closed)
         elif args.command == "prepare":
             if args.live_session != bool(args.paired_batch) or (args.live_session and
                     (not args.guided or args.max_calls != 1 or args.probe_session)):

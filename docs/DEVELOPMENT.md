@@ -248,3 +248,38 @@ provider terminal event, media ingress, or production unattended operation.
 Do not start other AGY sessions during this pilot. If a close confirmation
 dialog remains, close only the experiment window manually. Existing capture
 is preserved. No raw trace, identifier or transcript is printed in reports.
+
+### WP2 entry: sequential live lecture batch (owner-guided)
+
+After a successful paired recovery and a separate live session pilot, reuse
+those two private capability proofs to gate a new clip (not proof of media
+ingress for that clip). AGY 1.5.16 is pinned for this experimental route.
+Use the explicitly approved prior private Runtime manifest, not a search of
+other files. The existing manual-verbatim validator verifies the manifest and
+asset hashes; the new helper extracts a 30--120s H.264 640x360 1fps/AAC
+16kHz mono clip from the manifest's primary video and audio stream. Source
+files are unchanged. Caption JSON3, if already specified by the manifest,
+is used only as an unreviewed overlapping-event evaluation proxy; it is
+never supplied to the transcription model. Boundary events can overcount
+speech, automatic captions can omit/misrecognize words, and no human
+accuracy claim is made. Private paths and actual text are not printed.
+
+    python -m ytresearch.research_batch lecture-batch --root D:\private-experiments --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json --start-seconds 60 --duration-seconds 60 --paired-batch PAIRED_ID --pilot-batch LIVE_PILOT_ID --max-calls 6 --authorize-guided
+
+Check account quota before execution and on each model readiness screen.
+The default candidates are the six allowlisted models, sequentially. Each
+requires READY after confirming model identity and a single manual Enter
+after inspecting the actual media chip and prompt. The existing automatic
+log capture and targeted close are reused; no copy, CAPTURE, or manual
+evaluation is needed. A valid UNAVAILABLE response is retained as a quality
+failure and does not trigger retries. Timeout, ambiguous session, unresolved
+claim, or unexpected closure stops the batch. Never launch other AGY sessions
+during it. No automated submission or quota-meter inference.
+
+Resume the same content-addressed batch with live-batch --root ... --batch ...
+--paired-batch ... --pilot-batch ... --max-calls 6 --authorize-guided. The cap
+includes already reserved jobs. Completed captures and trace integrity are
+checked before reuse; no unsettled claim is retried. Only if the prior window
+has actually been closed, use --confirm-previous-closed. A global lock
+serializes this new live-batch mode; do not concurrently run legacy tools.
+All source/response artifacts remain private.

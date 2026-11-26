@@ -372,6 +372,63 @@ class ResearchBatchTests(unittest.TestCase):
             self.assertEqual(b.main(["prepare","--root",str(self.root),"--media","source.mp4",
                                      "--guided","--max-calls","1","--live-session"]), 2)
 
+    def test_caption_proxy_window_keeps_intersections_and_marks_boundary(self):
+        events = {"events":[
+            {"tStartMs":0,"dDurationMs":1000,"segs":[{"utf8":"outside"}]},
+            {"tStartMs":59000,"dDurationMs":2000,"segs":[{"utf8":"left"}]},
+            {"tStartMs":61000,"dDurationMs":2000,"segs":[{"utf8":"inside"}]},
+            {"tStartMs":119000,"dDurationMs":2000,"segs":[{"utf8":"right"}]},
+            {"tStartMs":120000,"dDurationMs":1000,"segs":[{"utf8":"outside"}]}]}
+        text, info = b.caption_proxy_window(b.json_bytes(events), 60, 60)
+        self.assertEqual(text, "left\ninside\nright")
+        self.assertEqual(info["boundary_events"], 2)
+
+    def test_live_batch_requires_authorization_before_any_work(self):
+        with patch.object(b,"prepare_lecture",side_effect=AssertionError("no preparation")), patch.object(
+                b,"live_batch",side_effect=AssertionError("no live")):
+            rc = b.main(["lecture-batch","--root",str(self.root),"--source-root",str(self.root),
+                         "--manifest","data/example.json","--paired-batch","x",
+                         "--pilot-batch","y","--max-calls","6"])
+        self.assertEqual(rc, 2)
+
+    def test_completed_live_job_rejects_uncertain_capture(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root,bid)
+        job = plan["jobs"][0]
+        with self.assertRaisesRegex(b.BatchError, "UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY"):
+            b.completed_live_job(root,base,job,{"status":"BLOCKED_UNSETTLED_CLAIM"})
+        b.claim(root,base,job)
+        raw=b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        b.capture(root,base,job,raw,1)
+        with self.assertRaisesRegex(b.BatchError, "UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY"):
+            b.completed_live_job(root,base,job,b.report(root,bid)["jobs"][0])
+
+    def test_live_batch_reuses_captured_job_and_stops_after_close_failure(self):
+        models=list(b.MODELS)[:3]
+        with patch.object(b,"check_media",return_value={"duration_seconds":30,"bytes":23}):
+            bid=b.prepare(self.root,"source.mp4","ref.txt",models=models)
+        root,base,plan=b.load_plan(self.root,bid)
+        first=plan["jobs"][0]
+        b.claim(root,base,first)
+        raw=b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        b.capture(root,base,first,raw,1,source="SESSION_TRACE_PILOT")
+        calls=[]
+        def fake_job(root,base,plan,job,pg,clip):
+            calls.append(job["id"])
+            b.claim(root,base,job)
+            b.capture(root,base,job,raw,1,source="SESSION_TRACE_PILOT")
+            return {"window_close_status":"MANUAL_CLOSE_REQUIRED"}
+        # Patch a small predicate rather than os.name, which changes pathlib semantics.
+        with patch.object(b,"is_windows",return_value=True), patch.object(
+                b,"validate_live_proofs",return_value={}), patch.object(
+                b,"capability_probe",return_value={"version":"1.5.16"}), patch.object(
+                b,"gui_context",return_value=(None,None)), patch.object(
+                b,"completed_live_job",return_value={}), patch.object(b,"live_job",side_effect=fake_job):
+            result=b.live_batch(root,bid,"paired","pilot",3)
+        self.assertEqual(calls,["j02"])
+        self.assertEqual(result["reserved_attempts"],2)
+        self.assertEqual(result["jobs"][2]["status"],"PENDING")
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
