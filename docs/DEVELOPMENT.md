@@ -386,3 +386,24 @@ provider bytes. A valid correlated trace contradicting it blocks recovery.
 Its separate immutable snapshot/receipt is verified before resuming
 later jobs. Keep elapsed time null and compare accuracy as provisional
 operator-supplied evidence. Do not include private response text in Git.
+
+### WP3 first equal-span clip length experiment
+
+Research-only commands length-plan, length-report and length-run compare
+30, 60 and 120 second nonoverlapping tilings of the same 120-second
+lecture span using Flash Medium. An existing captured first 60-second
+window is required and re-derived from the exact approved source,
+original trial and model order; no retranscription. Six other
+single-model jobs are prepared with the existing clip validator.
+The plan is content-addressed and private. The common 120-second
+caption reference is evaluated once per tiling against chronological
+concatenation of its raw transcripts, including empty captures.
+Per-clip caption metrics remain diagnostic; overlapping subtitle
+events at interior boundaries are not summed. No human accuracy
+or provider ingress claims. Preparation and reporting submit zero
+model requests. A run requires explicit authorization and a total
+pending-call ceiling of at most six, validates all existing claims
+and captures, then uses the existing guided controller sequentially.
+Never retry an unsettled job. 300-second coverage is deferred until
+after this first equal-span pilot; existing 120-second preparation
+limit is unchanged. No changes to production workers.

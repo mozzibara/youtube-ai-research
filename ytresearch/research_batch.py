@@ -1866,10 +1866,220 @@ def recover_live_job(root, bid, job_id, *, operator_closed, operator_response=No
         global_lock.unlink()
 
 
+LENGTH_SCHEMA = "wp3_equal_span_length_v1"
+LENGTH_MODEL = "gemini-3.8-flash-medium"
+LENGTHS = (30, 60, 120)
+
+
+def length_id(plan):
+    return "length-" + digest(json_bytes(plan))[:24]
+
+
+def prepare_length_plan(root, source_root, manifest, start, reuse_batch):
+    """Fixed 120-second span, three complete tilings, no model requests."""
+    if type(start) is not int or not 0 <= start <= 86280:
+        raise BatchError("LENGTH_START_INVALID")
+    root = safe_root(root)
+    _, original_base, original = load_plan(root, reuse_batch)
+    original_report = report(root, reuse_batch)
+    matches = [r for r in original_report["jobs"] if r["model"] == LENGTH_MODEL]
+    if len(matches) != 1 or matches[0]["status"] != "CAPTURED":
+        raise BatchError("LENGTH_REUSE_CAPTURE_REQUIRED")
+    job = next(j for j in original["jobs"] if j["model"] == LENGTH_MODEL)
+    workspace(root, original_base, job, original)
+    completed_live_job(root, original_base, job, matches[0])
+    # Re-derive the existing batch from the exact source, window and original
+    # trial/model order; do not substitute a new capture or re-encode a clip.
+    rebuilt, _ = prepare_lecture(root, source_root, manifest, start, 60,
+                                 [j["model"] for j in original["jobs"]],
+                                 original["trial"])
+    if rebuilt != reuse_batch:
+        raise BatchError("LENGTH_REUSE_SOURCE_MISMATCH")
+    groups = []
+    for length in LENGTHS:
+        windows = []
+        for offset in range(0, 120, length):
+            pos = start + offset
+            reused = length == 60 and offset == 0
+            if reused:
+                bid = reuse_batch
+            else:
+                bid, _ = prepare_lecture(root, source_root, manifest, pos, length,
+                                         [LENGTH_MODEL],
+                                         f"wp3-l120-s{pos}-d{length}")
+            windows.append({"start_seconds": pos, "duration_seconds": length,
+                            "batch_id": bid, "reused": reused})
+        groups.append({"length_seconds": length, "windows": windows})
+    plan = {"schema": LENGTH_SCHEMA, "model": LENGTH_MODEL,
+            "start_seconds": start, "span_seconds": 120, "groups": groups,
+            "reference_scope": "COMMON_WHOLE_SPAN_CAPTION_PROXY",
+            "reuse_batch": reuse_batch}
+    lid = length_id(plan)
+    write_once(root, Path("length-plans") / (lid + ".json"), json_bytes(plan))
+    return length_report(root, lid)
+
+
+def load_length_plan(root, lid):
+    root = safe_root(root)
+    if not re.fullmatch(r"length-[0-9a-f]{24}", lid):
+        raise BatchError("INVALID_LENGTH_PLAN_ID")
+    plan = parse_json(read_bytes(safe_path(root, Path("length-plans") / (lid + ".json"))))
+    if (not isinstance(plan, dict) or length_id(plan) != lid
+            or plan.get("schema") != LENGTH_SCHEMA or plan.get("model") != LENGTH_MODEL
+            or plan.get("span_seconds") != 120
+            or plan.get("reference_scope") != "COMMON_WHOLE_SPAN_CAPTION_PROXY"
+            or type(plan.get("start_seconds")) is not int
+            or not 0 <= plan["start_seconds"] <= 86280):
+        raise BatchError("LENGTH_PLAN_INVALID")
+    if [g.get("length_seconds") for g in plan["groups"]] != list(LENGTHS):
+        raise BatchError("LENGTH_GROUPS_INVALID")
+    seen = set()
+    for group in plan["groups"]:
+        length = group["length_seconds"]
+        windows = group["windows"]
+        if len(windows) != 120 // length:
+            raise BatchError("LENGTH_COVERAGE_INVALID")
+        for offset, window in enumerate(windows):
+            reused = length == 60 and offset == 0
+            if (window.get("start_seconds") != plan["start_seconds"] + offset * length
+                    or window.get("duration_seconds") != length
+                    or window.get("reused") is not reused
+                    or (window["batch_id"] == plan["reuse_batch"]) != reused
+                    or window["batch_id"] in seen):
+                raise BatchError("LENGTH_COVERAGE_INVALID")
+            seen.add(window["batch_id"])
+    return root, plan
+
+
+def length_state(root, lid):
+    root, plan = load_length_plan(root, lid)
+    groups = []
+    for group in plan["groups"]:
+        windows = []
+        for window in group["windows"]:
+            bid = window["batch_id"]
+            _, base, batch = load_plan(root, bid)
+            summary = report(root, bid)
+            if batch["reference_kind"] != "CAPTION_PROXY":
+                raise BatchError("LENGTH_CAPTION_REFERENCE_REQUIRED")
+            source = parse_json(read_bytes(safe_path(root, base / "lecture-source.json")))
+            if (source.get("batch_id") != bid
+                    or source.get("clip_sha256") != batch["media_sha256"]
+                    or source.get("start_seconds") != window["start_seconds"]
+                    or source.get("duration_seconds") != window["duration_seconds"]
+                    or source.get("source_manifest_assets_verified") is not True
+                    or abs(batch["media"]["duration_seconds"] - window["duration_seconds"]) > 1.1):
+                raise BatchError("LENGTH_WINDOW_EVIDENCE_MISMATCH")
+            matches = [(j, r) for j, r in zip(batch["jobs"], summary["jobs"])
+                       if j["model"] == LENGTH_MODEL]
+            if len(matches) != 1 or (not window["reused"] and len(batch["jobs"]) != 1):
+                raise BatchError("LENGTH_MODEL_MISMATCH")
+            job, row = matches[0]
+            workspace(root, base, job, batch)
+            transcript = None
+            if row["status"] == "CAPTURED":
+                completed_live_job(root, base, job, row)
+                raw = read_bytes(safe_path(root, base / job["id"] / "response.txt"))
+                transcript = validate_response(raw)["transcript"]
+            elif row["status"] != "PENDING" or window["reused"] or summary["reserved_attempts"]:
+                raise BatchError("LENGTH_UNSETTLED_CLAIM_NO_RETRY")
+            windows.append((window, row, transcript, base, batch))
+        groups.append((group["length_seconds"], windows))
+    return root, plan, groups
+
+
+def length_report(root, lid):
+    root, plan, groups = length_state(root, lid)
+    # The 120-second batch carries the single common reference. Never sum
+    # per-clip caption events, which can be duplicated at interior boundaries.
+    _, _, _, base, whole = groups[-1][1][0]
+    raw = read_bytes(safe_path(root, base / "evaluation-only" / "reference.txt"))
+    if digest(raw) != whole["reference_sha256"]:
+        raise BatchError("LENGTH_COMMON_REFERENCE_HASH_MISMATCH")
+    reference = raw.decode("utf-8-sig")
+    results = []
+    pending = []
+    for length, windows in groups:
+        rows = []
+        transcripts = []
+        for window, row, transcript, _, _ in windows:
+            rows.append(dict(window, capture_status=row["status"],
+                             model_reported_status=row.get("model_reported_status"),
+                             transcript_nonempty=row.get("transcript_nonempty"),
+                             elapsed_seconds=row.get("elapsed_seconds"),
+                             per_clip_caption_metrics=row.get("metrics")))
+            if transcript is None:
+                pending.append(window["batch_id"])
+            else:
+                transcripts.append(transcript)
+        complete = len(transcripts) == len(windows)
+        elapsed = [r["elapsed_seconds"] for r in rows]
+        results.append({"length_seconds": length, "clip_count": len(windows),
+                        "captured_clips": len(transcripts),
+                        "nonempty_clips": sum(bool(t.strip()) for t in transcripts),
+                        "elapsed_seconds_sum": sum(elapsed) if complete and
+                        all(isinstance(t, (int, float)) for t in elapsed) else None,
+                        "common_span_metrics": metrics(reference, " ".join(transcripts))
+                        if complete else None,
+                        "windows": rows})
+    result = {"length_plan": lid, "status": "COMPLETE" if not pending else "PENDING",
+              "model": LENGTH_MODEL, "start_seconds": plan["start_seconds"],
+              "span_seconds": 120, "pending_calls": len(pending),
+              "pending_batches": pending, "common_reference_sha256": digest(raw),
+              "reference_scope": "COMMON_WHOLE_SPAN_CAPTION_PROXY_NOT_HUMAN_TRUTH",
+              "assembly": "CHRONOLOGICAL_CONCATENATION_NO_CORRECTION",
+              "groups": results, "model_requests": 0}
+    encoded = json_bytes(result)
+    write_once(root, Path("length-plans") / "reports" / lid /
+               (digest(encoded)[:24] + ".json"), encoded)
+    return result
+
+
+def run_length_plan(root, lid, paired_bid, pilot_bid, max_new_calls, *, authorized):
+    if not authorized:
+        raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
+    if type(max_new_calls) is not int or not 0 <= max_new_calls <= 6:
+        raise BatchError("LENGTH_CALL_LIMIT_INVALID")
+    result = length_report(root, lid)
+    pending = result["pending_batches"]
+    if len(pending) > max_new_calls:
+        raise BatchError("LENGTH_PENDING_EXCEEDS_APPROVED_LIMIT")
+    validate_live_proofs(root, paired_bid, pilot_bid)
+    for bid in pending:
+        print("LENGTH_BATCH=" + bid, flush=True)
+        live_batch(root, bid, paired_bid, pilot_bid, 1)
+        # Validate close/capture evidence before proceeding to another batch.
+        state = length_report(root, lid)
+        if bid in state["pending_batches"]:
+            raise BatchError("LENGTH_BATCH_INCOMPLETE_NO_RETRY")
+    result = length_report(root, lid)
+    result["authorized_max_new_calls"] = max_new_calls
+    result["initial_pending_jobs"] = len(pending)
+    result["script_submitted_model_requests"] = 0
+    result.pop("model_requests", None)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe")
+    lp = sub.add_parser("length-plan")
+    lp.add_argument("--root", required=True)
+    lp.add_argument("--source-root", required=True)
+    lp.add_argument("--manifest", required=True)
+    lp.add_argument("--start-seconds", type=int, required=True)
+    lp.add_argument("--reuse-batch", required=True)
+    lr = sub.add_parser("length-report")
+    lr.add_argument("--root", required=True)
+    lr.add_argument("--length-plan", required=True)
+    lx = sub.add_parser("length-run")
+    lx.add_argument("--root", required=True)
+    lx.add_argument("--length-plan", required=True)
+    lx.add_argument("--paired-batch", required=True)
+    lx.add_argument("--pilot-batch", required=True)
+    lx.add_argument("--max-new-calls", required=True, type=int)
+    lx.add_argument("--authorize-guided", action="store_true")
     live_recovery = sub.add_parser("recover-live-job")
     live_recovery.add_argument("--root", required=True)
     live_recovery.add_argument("--batch", required=True)
@@ -1929,6 +2139,15 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command == "length-plan":
+            result = prepare_length_plan(args.root, args.source_root, args.manifest,
+                                         args.start_seconds, args.reuse_batch)
+        elif args.command == "length-report":
+            result = length_report(args.root, args.length_plan)
+        elif args.command == "length-run":
+            result = run_length_plan(args.root, args.length_plan, args.paired_batch,
+                                     args.pilot_batch, args.max_new_calls,
+                                     authorized=args.authorize_guided)
         elif args.command == "recover-live-job":
             result = recover_live_job(args.root, args.batch, args.job, operator_closed=args.confirm_closed,
                                       operator_response=args.operator_response)

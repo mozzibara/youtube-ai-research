@@ -753,6 +753,82 @@ class ResearchBatchTests(unittest.TestCase):
                 b.recover_live_job(root,bid,job["id"],operator_closed=True,operator_response="supplied.json")
         self.assertFalse(b.safe_path(root,folder / "response.txt").exists())
 
+    def length_fixture(self):
+        # No FFmpeg, GUI, provider, or real media in this contract fixture.
+        def prepare_clip(root, source_root, manifest, start, seconds, models=None, trial="lecture-1"):
+            media = Path(f"fixture-{start}-{seconds}.mp4")
+            ref = Path(f"fixture-{start}-{seconds}.txt")
+            b.write_once(root, media, f"synthetic {start} {seconds}".encode())
+            # Identical total reference across tilings, including spaces.
+            b.write_once(root, ref, ("alpha " * (seconds // 30)).strip().encode())
+            with patch.object(b, "check_media", return_value={
+                    "duration_seconds": seconds, "bytes": (root / media).stat().st_size}):
+                bid = b.prepare(root, media, ref, "CAPTION_PROXY", models, trial)
+            _, base, plan = b.load_plan(root, bid)
+            meta = {"batch_id": bid, "clip_sha256": plan["media_sha256"],
+                    "start_seconds": start, "duration_seconds": seconds,
+                    "source_manifest_assets_verified": True}
+            b.write_once(root, base / "lecture-source.json", b.json_bytes(meta))
+            return bid, meta
+
+        original, _ = prepare_clip(self.root, self.root, "manifest", 60, 60,
+                                    [b.LENGTH_MODEL], "original")
+        root, base, plan = b.load_plan(self.root, original)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        b.capture(root, base, job, b.json_bytes({
+            "transcript": "alpha alpha", "uncertainties": [], "status": "COMPLETE"}), 2)
+        return original, prepare_clip
+
+    def test_equal_span_length_plan_reuses_one_and_scores_common_reference(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}):
+            result = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.assertEqual(result["pending_calls"], 6)
+            self.assertEqual([g["clip_count"] for g in result["groups"]], [4, 2, 1])
+            self.assertEqual(result, b.prepare_length_plan(self.root, self.root, "manifest", 60, original))
+            for group in result["groups"]:
+                for window in group["windows"]:
+                    if window["reused"]:
+                        self.assertEqual(window["batch_id"], original)
+                        continue
+                    root, base, plan = b.load_plan(self.root, window["batch_id"])
+                    job = plan["jobs"][0]
+                    b.claim(root, base, job)
+                    b.capture(root, base, job, b.json_bytes({
+                        "transcript": ("alpha " * (window["duration_seconds"] // 30)).strip(),
+                        "uncertainties": [], "status": "COMPLETE"}), 3)
+            final = b.length_report(self.root, result["length_plan"])
+            self.assertEqual(final["pending_calls"], 0)
+            self.assertEqual(final["status"], "COMPLETE")
+            for group in final["groups"]:
+                self.assertEqual(group["common_span_metrics"]["normalized_cer"]["rate"], 0)
+                self.assertEqual(group["common_span_metrics"]["normalized_cer"]["reference_units"], 20)
+
+    def test_equal_span_length_plan_blocks_unsettled_and_budget(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "live_batch", side_effect=AssertionError("no calls")):
+            result = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            lid = result["length_plan"]
+            with self.assertRaisesRegex(b.BatchError, "GUIDED_AUTHORIZATION_REQUIRED"):
+                b.run_length_plan(self.root, lid, "paired", "pilot", 6, authorized=False)
+            with self.assertRaisesRegex(b.BatchError, "LENGTH_PENDING_EXCEEDS_APPROVED_LIMIT"):
+                b.run_length_plan(self.root, lid, "paired", "pilot", 5, authorized=True)
+            root, base, plan = b.load_plan(self.root, result["pending_batches"][0])
+            b.claim(root, base, plan["jobs"][0])
+            with self.assertRaisesRegex(b.BatchError, "LENGTH_UNSETTLED_CLAIM_NO_RETRY"):
+                b.length_report(root, lid)
+
+    def test_equal_span_length_plan_refuses_wrong_reuse_window(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}):
+            with self.assertRaisesRegex(b.BatchError, "LENGTH_REUSE_SOURCE_MISMATCH"):
+                b.prepare_length_plan(self.root, self.root, "manifest", 90, original)
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
