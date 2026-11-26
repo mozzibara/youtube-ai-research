@@ -829,6 +829,66 @@ class ResearchBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(b.BatchError, "LENGTH_REUSE_SOURCE_MISMATCH"):
                 b.prepare_length_plan(self.root, self.root, "manifest", 90, original)
 
+    def test_stage_prompt_retains_clipboard_and_pastes_once(self):
+        from unittest.mock import Mock
+        pg, clip, target = Mock(), Mock(), Mock()
+        clip.paste.return_value = b.PROMPT.replace("\n", "\r\n")
+        with patch.object(b.time, "sleep"):
+            b.stage_prompt(pg, clip, target)
+        clip.copy.assert_called_once_with(b.PROMPT)
+        pg.hotkey.assert_called_once_with("ctrl", "v", interval=.1)
+        self.assertEqual(target.call_count, 2)
+        pg.reset_mock()
+        clip.paste.return_value = "wrong"
+        with self.assertRaisesRegex(b.BatchError, "PROMPT_CLIPBOARD_VERIFY_FAILED"):
+            b.stage_prompt(pg, clip, target)
+        pg.hotkey.assert_not_called()
+
+    def test_prompt_recovery_preserves_claim_and_records_distinct_reason(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        brain.mkdir()
+        b.claim(root, base, job)
+        b.write_once(root, folder / "AGY_WP1_0123456789AB.ps1", b"synthetic")
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.persist_session_baseline(root, folder)
+        old = b.read_bytes(b.safe_path(root, folder / "claim.json"))
+        with patch("tools.agy_media_probe.windows", return_value=[]), patch.object(
+                b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.authorize_clipboard_recovery(root, base, plan, job, None,
+                                           reason="PROMPT_NOT_INSERTED")
+            with self.assertRaisesRegex(b.BatchError, "CLIPBOARD_RECOVERY_ALREADY_USED"):
+                b.authorize_clipboard_recovery(root, base, plan, job, None)
+        receipt = b.parse_json(b.read_bytes(b.safe_path(root, folder / "clipboard-recovery.json")))
+        self.assertTrue(receipt["operator_declared_prompt_not_inserted_before_submit"])
+        self.assertFalse(receipt["operator_declared_clipboard_failure_before_submit"])
+        self.assertFalse(receipt["provider_no_submission_verified"])
+        self.assertEqual(b.read_bytes(b.safe_path(root, folder / "claim.json")), old)
+
+    def test_live_batch_prompt_recovery_routes_single_existing_claim(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        b.claim(root, base, job)
+        def fake_job(root, base, plan, job, pg, clip, **kwargs):
+            self.assertEqual(kwargs, {"recover_clipboard": True, "recovery_reason": "PROMPT_NOT_INSERTED"})
+            b.capture(root, base, job, b.json_bytes({
+                "transcript":"alpha", "uncertainties":[], "status":"COMPLETE"}), 1,
+                source="SESSION_TRACE_PILOT")
+            return {"window_close_status":"CLOSED"}
+        with patch.object(b,"is_windows",return_value=True), patch.object(
+                b,"validate_live_proofs",return_value={}), patch.object(
+                b,"capability_probe",return_value={"version":"1.5.16"}), patch.object(
+                b,"gui_context",return_value=(None,None)), patch.object(b,"live_job",side_effect=fake_job) as run:
+            result=b.live_batch(root,bid,"paired","pilot",1,recover_prompt_job=job["id"])
+            self.assertEqual(run.call_count,1)
+            self.assertEqual(result["reserved_attempts"],1)
+            self.assertEqual(result["live_batch"]["recovered_prompt_job"],job["id"])
+            self.assertIsNone(result["live_batch"]["recovered_clipboard_job"])
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

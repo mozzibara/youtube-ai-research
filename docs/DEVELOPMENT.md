@@ -407,3 +407,19 @@ and captures, then uses the existing guided controller sequentially.
 Never retry an unsettled job. 300-second coverage is deferred until
 after this first equal-span pilot; existing 120-second preparation
 limit is unchanged. No changes to production workers.
+
+### Prompt insertion failure during guided length runs
+
+The session-capture staging path now keeps the verified prompt in the
+clipboard instead of replacing it after one second. Clipboard agreement
+does not establish TUI paste success. Dismiss visible announcement
+banners before READY, verify exactly one media attachment and the entire
+prompt, and if the input is empty paste the retained prompt once before
+submitting. No automated Enter. If the operator interrupted a claim
+because the prompt was absent and no request was submitted, close the
+old experiment window and use live-batch --recover-prompt-job JOB_ID
+only with that explicit attestation. The same one-time recovery fence,
+original claim, baseline and nonempty-trace checks apply; the immutable
+receipt distinguishes the prompt failure from a file-drop failure.
+No claim deletion or automatic retries. Resume length-run only after
+the recovered job is captured and its evidence validates.

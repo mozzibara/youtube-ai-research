@@ -442,6 +442,19 @@ def prepare_file_drop(helper, media):
     raise BatchError("CLIPBOARD_FILE_DROP_FAILED")
 
 
+def stage_prompt(pg, pyperclip, target):
+    """Verify the local clipboard, paste once, and retain the prompt."""
+    target()
+    pyperclip.copy(PROMPT)
+    target()
+    observed = pyperclip.paste()
+    if not isinstance(observed, str) or observed.replace("\r\n", "\n") != PROMPT:
+        raise BatchError("PROMPT_CLIPBOARD_VERIFY_FAILED")
+    pg.hotkey("ctrl", "v", interval=.1)
+    time.sleep(1)
+    # Clipboard agreement is not proof that the TUI accepted the paste.
+
+
 def stage_window(root, base, job, plan, pg, pyperclip, log_path=None, *, return_identity=False):
     from tools.agy_media_probe import choose_window, focus, ps_quote, windows
     work, media = workspace(root, base, job, plan)
@@ -476,6 +489,7 @@ def stage_window(root, base, job, plan, pg, pyperclip, log_path=None, *, return_
     if hwnd is None:
         raise BatchError("UNIQUE_WINDOW_NOT_FOUND")
     print(f"{job['id']} {job['model']}: verify AGY is ready and shows the requested model.")
+    print("Dismiss any visible welcome/announcement banner before READY; do not submit.", flush=True)
     if input("Return to this controller and type READY (anything else stops): ").strip() != "READY":
         raise BatchError("OPERATOR_STOPPED_BEFORE_STAGING")
 
@@ -491,12 +505,13 @@ def stage_window(root, base, job, plan, pg, pyperclip, log_path=None, *, return_
     target()
     pg.hotkey("alt", "v", interval=.1)
     time.sleep(3)
-    target()
-    pyperclip.copy(PROMPT)
-    pg.hotkey("ctrl", "v", interval=.1)
-    time.sleep(1)
-    # Clear stale JSON/prompt clipboard; no automated submission.
-    pyperclip.copy("WP1_WAITING_FOR_OPERATOR_CAPTURE_" + title)
+    stage_prompt(pg, pyperclip, target)
+    if return_identity:
+        print("If the prompt is absent, focus the empty AGY input and paste once from the retained clipboard.", flush=True)
+        print("Verify the entire prompt and exactly one media attachment before pressing Enter.", flush=True)
+    else:
+        # Historical clipboard-capture route retains its sentinel.
+        pyperclip.copy("WP1_WAITING_FOR_OPERATOR_CAPTURE_" + title)
     return (hwnd, title) if return_identity else hwnd
 
 
@@ -1558,12 +1573,14 @@ def prepare_lecture(root, source_root, manifest, start, seconds, models=None, tr
     return bid, metadata
 
 
-def authorize_clipboard_recovery(root, base, plan, job, pg):
+def authorize_clipboard_recovery(root, base, plan, job, pg, *, reason="FILE_DROP_FAILED"):
     """One-time reuse of a reservation after an owner-confirmed pre-submit failure.
 
     This is not proof of zero provider requests. Never remove or rewrite the
     original claim/baseline, and refuse if any scoped trace contains a turn.
     """
+    if reason not in ("FILE_DROP_FAILED", "PROMPT_NOT_INSERTED"):
+        raise BatchError("PRE_SUBMISSION_RECOVERY_REASON_INVALID")
     from tools.agy_media_probe import windows
     folder = base / job["id"]
     for name in ("receipt.json", "response.txt", "live-session.snapshot",
@@ -1605,7 +1622,9 @@ def authorize_clipboard_recovery(root, base, plan, job, pg):
             if read_bytes(path, MAX_LOG).strip():
                 raise BatchError("CLIPBOARD_RECOVERY_SESSION_TRACE_PRESENT")
     workspace(root, base, job, plan)
-    receipt = {"job_id": job["id"], "operator_declared_clipboard_failure_before_submit": True,
+    receipt = {"job_id": job["id"], "operator_declared_clipboard_failure_before_submit": reason == "FILE_DROP_FAILED",
+               "operator_declared_prompt_not_inserted_before_submit": reason == "PROMPT_NOT_INSERTED",
+               "pre_submission_recovery_reason": reason,
                "operator_declared_previous_window_closed": True,
                "prior_claim_preserved": True, "prior_baseline_sha256": digest(saved_raw),
                "new_session_count": len(new), "provider_no_submission_verified": False,
@@ -1613,11 +1632,11 @@ def authorize_clipboard_recovery(root, base, plan, job, pg):
     write_once(root, folder / "clipboard-recovery.json", json_bytes(receipt))
 
 
-def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False):
+def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False, recovery_reason="FILE_DROP_FAILED"):
     folder = base / job["id"]
     workspace(root, base, job, plan)
     if recover_clipboard:
-        authorize_clipboard_recovery(root, base, plan, job, pg)
+        authorize_clipboard_recovery(root, base, plan, job, pg, reason=recovery_reason)
         before = persist_session_baseline(root, folder, filename="session-baseline-recovery.json")
     else:
         before = persist_session_baseline(root, folder)
@@ -1689,8 +1708,13 @@ def is_windows():
     return os.name == "nt"
 
 
-def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=False, recover_clipboard_job=None):
+def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=False,
+               recover_clipboard_job=None, recover_prompt_job=None):
     """Sequential, bounded research run; user still verifies and submits each job."""
+    if recover_clipboard_job is not None and recover_prompt_job is not None:
+        raise BatchError("PRE_SUBMISSION_RECOVERY_REASON_CONFLICT")
+    recovery_job = recover_prompt_job if recover_prompt_job is not None else recover_clipboard_job
+    recovery_reason = "PROMPT_NOT_INSERTED" if recover_prompt_job is not None else "FILE_DROP_FAILED"
     if not is_windows() or not 1 <= max_calls <= len(MODELS):
         raise BatchError("LIVE_BATCH_WINDOWS_AND_LIMIT_REQUIRED")
     root, base, plan = load_plan(root, bid)
@@ -1715,23 +1739,23 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
             # The only recovery exception is a single explicitly attested
             # pre-submit clipboard failure at the first unfinished job.
             unfinished = [r for r in summary["jobs"] if r["status"] != "CAPTURED"]
-            if recover_clipboard_job is not None:
-                if (not unfinished or unfinished[0]["id"] != recover_clipboard_job
+            if recovery_job is not None:
+                if (not unfinished or unfinished[0]["id"] != recovery_job
                         or unfinished[0]["status"] != "BLOCKED_UNSETTLED_CLAIM"
                         or any(r["claim_exists"] for r in unfinished[1:])):
                     raise BatchError("CLIPBOARD_RECOVERY_NOT_FIRST_UNSETTLED_JOB")
             for job, row in zip(plan["jobs"], summary["jobs"]):
-                if row["claim_exists"] and row["id"] != recover_clipboard_job:
+                if row["claim_exists"] and row["id"] != recovery_job:
                     completed_live_job(root, base, job, row, confirm_closed=confirm_closed)
             for job, row in zip(plan["jobs"], summary["jobs"]):
-                if not row["claim_exists"] or row["id"] == recover_clipboard_job:
+                if not row["claim_exists"] or row["id"] == recovery_job:
                     workspace(root, base, job, plan)
             used = summary["reserved_attempts"]
             new_count = 0
             for job, row in zip(plan["jobs"], summary["jobs"]):
-                if row["id"] == recover_clipboard_job:
+                if row["id"] == recovery_job:
                     evidence = live_job(root, base, plan, job, pg, pyperclip,
-                                        recover_clipboard=True)
+                                        recover_clipboard=True, recovery_reason=recovery_reason)
                 else:
                     if row["claim_exists"]:
                         continue
@@ -1749,6 +1773,7 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
                                     "attempt_limit": max_calls, "script_submitted_model_requests": 0,
                                     "fully_unattended": False,
                                     "recovered_clipboard_job": recover_clipboard_job,
+                                    "recovered_prompt_job": recover_prompt_job,
                                     "provider_terminal_event_verified": False}
             return result
         finally:
@@ -2118,7 +2143,9 @@ def main(argv=None):
     resume = sub.add_parser("live-batch")
     resume.add_argument("--root", required=True)
     resume.add_argument("--batch", required=True)
-    resume.add_argument("--recover-clipboard-job", help="One-time owner attestation: exact job stopped at CLIPBOARD_FILE_DROP_FAILED before any submission; previous window closed")
+    recover_modes = resume.add_mutually_exclusive_group()
+    recover_modes.add_argument("--recover-clipboard-job", help="One-time owner attestation: exact job stopped at CLIPBOARD_FILE_DROP_FAILED before any submission; previous window closed")
+    recover_modes.add_argument("--recover-prompt-job", help="One-time owner attestation: prompt absent and no submission occurred; previous window closed")
     for p in (lecture, resume):
         p.add_argument("--paired-batch", required=True)
         p.add_argument("--pilot-batch", required=True)
@@ -2178,7 +2205,8 @@ def main(argv=None):
                 bid = args.batch
             result = live_batch(args.root, bid, args.paired_batch, args.pilot_batch,
                                 args.max_calls, confirm_closed=args.confirm_previous_closed,
-                                recover_clipboard_job=getattr(args, "recover_clipboard_job", None))
+                                recover_clipboard_job=getattr(args, "recover_clipboard_job", None),
+                                recover_prompt_job=getattr(args, "recover_prompt_job", None))
         elif args.command == "prepare":
             if args.live_session != bool(args.paired_batch) or (args.live_session and
                     (not args.guided or args.max_calls != 1 or args.probe_session)):
