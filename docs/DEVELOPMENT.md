@@ -352,3 +352,28 @@ one-time receipt, the old claim/baseline remain, and a separate baseline
 is used for the recovered attempt. A recovery interruption is not retried.
 The reserved job counts once toward the original total cap; no automated
 submission is performed. Completed jobs are validated and reused.
+
+### Interrupted live capture recovery and diagnostic polling
+
+A completed TUI response can precede the controller's strict two-alias
+capture gate. No automatic retry or claim removal. Both known aliases may
+now differ in byte layout but must independently have a single correlated
+user turn, one media record, a final MODEL/DONE valid JSON response and
+equal parsed responses. Additional rows are allowed only if completed
+MODEL planner rows, no recorded tools and no earlier schema-valid response.
+Unknown row types and conflicting finals still block. Both trace aliases
+are preserved and hash-verified; live polling checks stability of both
+and prints a safe progress status every 15s. This is experimental, not an
+official provider completion signal.
+
+After stopping the controller and closing only the experiment AGY window:
+
+    python -m ytresearch.research_batch recover-live-job --root D:\private-experiments --batch BATCH_ID --job JOB_ID --confirm-closed
+
+It uses the recovery baseline when a prior clipboard recovery receipt
+exists, otherwise the original baseline. No process launch or submission.
+On agreeing final traces, save response/aliases and a distinct recovery
+receipt with elapsed=null (actual timing unavailable). Otherwise emit only
+allowlisted trace structure and stop. Resume the original live-batch only
+after recovery succeeds. The capture remains review-required; no provider
+ingress or independent accuracy claim is made.

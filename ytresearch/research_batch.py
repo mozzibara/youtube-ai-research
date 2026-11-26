@@ -332,7 +332,7 @@ def capability_probe():
 
 def capture(root, base, job, raw, elapsed, *, source="DIRECT_TUI_CLIPBOARD"):
     """Preserve captured bytes before parsing. Never replace a previous capture."""
-    if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT"):
+    if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY"):
         raise BatchError("INVALID_CAPTURE_SOURCE")
     folder = base / job["id"]
     claim_path = safe_path(root, folder / "claim.json")
@@ -629,7 +629,12 @@ def session_log_candidate(raw, *, live=False):
             return None
         if live or mode == "WRAPPED":
             media = user.get("media")
-            if (len(rows) != 2 or rows[0] != user
+            if (len(rows) < 2 or rows[0] != user
+                    or any(r.get("type") != "PLANNER_RESPONSE"
+                           or r.get("source") != "MODEL"
+                           or r.get("status") != "DONE" for r in rows[1:])
+                    or any(response_from_content(r.get("content")) is not None
+                           for r in rows[1:-1])
                     or user.get("source") != "USER_EXPLICIT"
                     or user.get("status") != "DONE"
                     or not isinstance(media, list) or len(media) != 1):
@@ -1074,29 +1079,107 @@ def live_pair(session):
     return (a, candidate) if candidate is not None else None
 
 
+def safe_trace_shape(raw):
+    """Allowlisted structural evidence only, without arbitrary row text."""
+    result = {"rows": 0, "invalid_rows": 0, "user_rows": 0, "planner_rows": 0,
+              "other_rows": 0, "done_rows": 0, "model_rows": 0, "tool_rows": 0,
+              "prompt_rows": 0, "valid_response_rows": 0,
+              "last_row_is_done_model": False}
+    lines = [line for line in raw.splitlines() if line.strip()]
+    result["rows"] = len(lines)
+    if len(lines) > 10000:
+        result["limit_reached"] = True
+        return result
+    for line in lines:
+        try:
+            row = parse_json(line)
+        except (ValueError, RecursionError):
+            result["invalid_rows"] += 1
+            continue
+        if not isinstance(row, dict):
+            result["invalid_rows"] += 1
+            continue
+        typ = row.get("type")
+        result["user_rows"] += int(typ == "USER_INPUT")
+        result["planner_rows"] += int(typ == "PLANNER_RESPONSE")
+        result["other_rows"] += int(typ not in ("USER_INPUT", "PLANNER_RESPONSE"))
+        result["done_rows"] += int(row.get("status") == "DONE")
+        result["model_rows"] += int(row.get("source") == "MODEL")
+        result["tool_rows"] += int(bool(row.get("tool_calls")))
+        result["prompt_rows"] += int(prompt_match(row.get("content")) is not None)
+        result["valid_response_rows"] += int(response_from_content(row.get("content")) is not None)
+        result["last_row_is_done_model"] = (
+            typ == "PLANNER_RESPONSE" and row.get("source") == "MODEL"
+            and row.get("status") == "DONE")
+    return result
+
+
+def read_agreeing_pair(session):
+    """Both known aliases must independently parse and agree on final JSON."""
+    paths = scoped_session_candidates(session)
+    info = {"candidate_count": len(paths), "status": "TRACE_PAIR_MISSING", "traces": []}
+    if len(paths) != 2 or {p.name for p in paths} != {"transcript.jsonl", "transcript_full.jsonl"}:
+        return None, info
+    records = []
+    for path in paths:
+        try:
+            raw = read_bytes(path, MAX_LOG)
+        except (OSError, BatchError):
+            info["status"] = "TRACE_UNREADABLE_OR_OVERSIZED"
+            return None, info
+        candidate = session_log_candidate(raw, live=True)
+        records.append((raw, candidate))
+        info["traces"].append({"filename": path.name, "bytes": len(raw),
+                               "sha256": digest(raw), "valid_final_response": candidate is not None,
+                               "shape": safe_trace_shape(raw)})
+    a, b = records
+    info["hashes_equal"] = a[0] == b[0]
+    if a[1] is None or b[1] is None:
+        info["status"] = "TRACE_FINAL_RESPONSE_NOT_VALID"
+        return None, info
+    if validate_response(a[1]) != validate_response(b[1]):
+        info["status"] = "TRACE_FINAL_RESPONSE_CONFLICT"
+        return None, info
+    info["status"] = "AGREEING_FINAL_RESPONSE"
+    return (a[0], a[1], b[0]), info
+
+
+def session_from_baseline(before):
+    after = fresh_brain_dirs()
+    if after is None or after[0] != before[0]:
+        raise BatchError("SESSION_BASELINE_UNAVAILABLE")
+    new = after[1] - before[1]
+    if len(new) > 1:
+        raise BatchError("AMBIGUOUS_NEW_SESSION")
+    if not new:
+        return None
+    name = next(iter(new))
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
+        raise BatchError("UNSAFE_SESSION_IDENTIFIER")
+    return after[0] / name
+
+
 def wait_live_pair(before, *, timeout=180, settle=5):
-    """Bounded polling. Stability is a heuristic, not a provider terminal event."""
-    deadline = time.monotonic() + timeout
-    previous = None
-    since = None
+    """Bounded polling of both final responses, with safe progress reporting."""
+    started = time.monotonic()
+    deadline = started + timeout
+    previous = since = None
+    next_progress = started + 15
     while time.monotonic() < deadline:
-        after = fresh_brain_dirs()
-        if after is None or after[0] != before[0]:
-            raise BatchError("SESSION_BASELINE_UNAVAILABLE")
-        new = after[1] - before[1]
-        if len(new) > 1:
-            raise BatchError("AMBIGUOUS_NEW_SESSION")
-        pair = None
-        if len(new) == 1:
-            name = next(iter(new))
-            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name):
-                raise BatchError("UNSAFE_SESSION_IDENTIFIER")
-            pair = live_pair(after[0] / name)
+        session = session_from_baseline(before)
+        pair, info = (read_agreeing_pair(session) if session is not None else
+                      (None, {"status": "WAITING_FOR_NEW_SESSION", "candidate_count": 0}))
+        now = time.monotonic()
+        if now >= next_progress:
+            print("LIVE_WAIT=" + json.dumps({"elapsed_seconds": round(now-started),
+                  "trace_status": info["status"], "candidate_count": info["candidate_count"],
+                  "valid_final_count": sum(x["valid_final_response"] for x in info.get("traces", []))}),
+                  flush=True)
+            next_progress = now + 15
         if pair is None:
             previous = since = None
         else:
-            key = (name, digest(pair[0]))
-            now = time.monotonic()
+            key = (session.name, digest(pair[0]), digest(pair[2]))
             if key != previous:
                 previous, since = key, now
             elif now - since >= settle:
@@ -1165,8 +1248,9 @@ def live_session_pilot(root, bid, paired_bid, max_calls):
         print("Verify the MP4 chip and prompt. Press Enter ONCE in AGY. No copy or close needed.", flush=True)
         print("Do not start other AGY sessions. On timeout do not resubmit.", flush=True)
         started = time.monotonic()
-        trace, raw = wait_live_pair(before)
+        trace, raw, alias = wait_live_pair(before)
         write_once(root, folder / "live-session.snapshot", trace)
+        write_once(root, folder / "live-session-alias.snapshot", alias)
         status = capture(root, base, job, raw, time.monotonic() - started,
                          source="SESSION_TRACE_PILOT")
         if status != "CAPTURED":
@@ -1174,7 +1258,8 @@ def live_session_pilot(root, bid, paired_bid, max_calls):
         close_status = close_pilot_window(pg, hwnd, title)
         evidence = {"capture_source": "SESSION_TRACE_PILOT",
                     "automatic_session_extraction_observed": True,
-                    "completion_evidence": "TWO_IDENTICAL_DONE_TRACES_STABLE_5S",
+                    "completion_evidence": "TWO_AGREEING_DONE_TRACES_STABLE_5S",
+                    "alias_sha256": digest(alias),
                     "provider_terminal_event_verified": False,
                     "provider_ingress_verified": False,
                     "script_submitted_model_requests": 0,
@@ -1203,7 +1288,8 @@ def validate_live_proofs(root, paired_bid, pilot_bid):
     response = read_bytes(safe_path(root, folder / "response.txt"))
     if (evidence.get("session_sha256") != digest(trace)
             or evidence.get("automatic_session_extraction_observed") is not True
-            or evidence.get("completion_evidence") != "TWO_IDENTICAL_DONE_TRACES_STABLE_5S"
+            or evidence.get("completion_evidence") not in ("TWO_IDENTICAL_DONE_TRACES_STABLE_5S",
+                   "TWO_AGREEING_DONE_TRACES_STABLE_5S")
             or evidence.get("window_close_status") != "CLOSED"
             or compare_capture_candidate(session_log_candidate(trace, live=True), response)
             not in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH")):
@@ -1539,8 +1625,9 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False):
     print("Verify the MP4 chip and prompt. Press Enter ONCE in AGY. No copy or close needed.", flush=True)
     print("Do not start other AGY sessions. On timeout do not resubmit.", flush=True)
     started = time.monotonic()
-    trace, raw = wait_live_pair(before, timeout=600)
+    trace, raw, alias = wait_live_pair(before, timeout=600)
     write_once(root, folder / "live-session.snapshot", trace)
+    write_once(root, folder / "live-session-alias.snapshot", alias)
     status = capture(root, base, job, raw, time.monotonic() - started,
                      source="SESSION_TRACE_PILOT")
     if status != "CAPTURED":
@@ -1548,7 +1635,8 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False):
     close_status = close_pilot_window(pg, hwnd, title)
     evidence = {"capture_source": "SESSION_TRACE_PILOT",
                 "automatic_session_extraction_observed": True,
-                "completion_evidence": "TWO_IDENTICAL_DONE_TRACES_STABLE_5S",
+                "completion_evidence": "TWO_AGREEING_DONE_TRACES_STABLE_5S",
+                    "alias_sha256": digest(alias),
                 "provider_terminal_event_verified": False,
                 "provider_ingress_verified": False,
                 "script_submitted_model_requests": 0,
@@ -1560,7 +1648,8 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False):
 
 def completed_live_job(root, base, job, row, *, confirm_closed=False):
     """Validate saved capture before reuse; never resubmit a claimed job."""
-    if row["status"] != "CAPTURED" or row.get("capture_source") != "SESSION_TRACE_PILOT":
+    if row["status"] != "CAPTURED" or row.get("capture_source") not in (
+            "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY"):
         raise BatchError("UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY")
     folder = base / job["id"]
     trace = read_bytes(safe_path(root, folder / "live-session.snapshot"), MAX_LOG)
@@ -1571,7 +1660,15 @@ def completed_live_job(root, base, job, row, *, confirm_closed=False):
     evidence = parse_json(read_bytes(safe_path(root, folder / "live-pilot.json")))
     if evidence.get("session_sha256") != digest(trace):
         raise BatchError("LIVE_TRACE_HASH_MISMATCH")
-    if evidence.get("window_close_status") not in ("CLOSED", "ALREADY_CLOSED") and not confirm_closed:
+    if evidence.get("alias_sha256") is not None:
+        alias = read_bytes(safe_path(root, folder / "live-session-alias.snapshot"), MAX_LOG)
+        if (digest(alias) != evidence["alias_sha256"] or
+                compare_capture_candidate(session_log_candidate(alias, live=True), response)
+                not in ("EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH")):
+            raise BatchError("LIVE_ALIAS_TRACE_MISMATCH")
+    elif row.get("capture_source") == "SESSION_TRACE_RECOVERY":
+        raise BatchError("RECOVERY_ALIAS_REQUIRED")
+    if evidence.get("window_close_status") not in ("CLOSED", "ALREADY_CLOSED", "OPERATOR_CONFIRMED_CLOSED") and not confirm_closed:
         raise BatchError("PREVIOUS_WINDOW_CLOSE_CONFIRMATION_REQUIRED")
     return evidence
 
@@ -1648,10 +1745,96 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
         global_lock.unlink()
 
 
+def recover_live_job(root, bid, job_id, *, operator_closed):
+    """Post-close recovery of an existing claim; never launch or resubmit."""
+    if not operator_closed:
+        raise BatchError("OPERATOR_CLOSE_CONFIRMATION_REQUIRED")
+    root, base, plan = load_plan(root, bid)
+    jobs = [job for job in plan["jobs"] if job["id"] == job_id]
+    if len(jobs) != 1:
+        raise BatchError("INVALID_RECOVERY_JOB")
+    job = jobs[0]
+    folder = base / job_id
+    global_lock = safe_path(root, Path("phase2-batches") / "live-controller.lock")
+    with global_lock.open("xb") as f:
+        f.write(b"LIVE_RECOVERY_CONTROLLER\n")
+    lock = safe_path(root, base / "controller.lock")
+    try:
+        with lock.open("xb") as f:
+            f.write(b"LIVE_RECOVERY_CONTROLLER\n")
+        try:
+            row = next(r for r in report(root, bid)["jobs"] if r["id"] == job_id)
+            if row["status"] == "CAPTURED":
+                completed_live_job(root, base, job, row, confirm_closed=True)
+                return {"status": "ALREADY_CAPTURED", "job_id": job_id, "model_requests": 0}
+            if row["status"] != "BLOCKED_UNSETTLED_CLAIM":
+                raise BatchError("RECOVERY_REQUIRES_EXISTING_CLAIM")
+            claim_data = parse_json(read_bytes(safe_path(root, folder / "claim.json")))
+            if claim_data != {"job": job, "reservation": "POSSIBLE_SUBMISSION"}:
+                raise BatchError("RECOVERY_CLAIM_INVALID")
+            workspace(root, base, job, plan)
+            retry = safe_path(root, folder / "clipboard-recovery.json").exists()
+            baseline_name = "session-baseline-recovery.json" if retry else "session-baseline.json"
+            if retry:
+                attestation = parse_json(read_bytes(safe_path(root, folder / "clipboard-recovery.json")))
+                original = read_bytes(safe_path(root, folder / "session-baseline.json"))
+                if (attestation.get("job_id") != job_id or
+                        attestation.get("prior_baseline_sha256") != digest(original)):
+                    raise BatchError("RECOVERY_BASELINE_LINK_INVALID")
+            baseline = parse_json(read_bytes(safe_path(root, folder / baseline_name)))
+            names = baseline.get("directory_names")
+            if (baseline.get("schema") != "wp1_session_baseline_v1" or
+                    not isinstance(names, list) or len(names) > 10000 or
+                    any(not isinstance(n, str) for n in names)):
+                raise BatchError("SESSION_BASELINE_INVALID")
+            brain = brain_root()
+            if brain is None:
+                raise BatchError("SESSION_BASELINE_UNAVAILABLE")
+            session = session_from_baseline((brain, set(names)))
+            pair, info = (read_agreeing_pair(session) if session is not None else
+                          (None, {"status": "NO_NEW_SESSION", "candidate_count": 0}))
+            result = {"job_id": job_id, "batch_id": bid, "model_requests": 0,
+                      "baseline_kind": "CLIPBOARD_RECOVERY" if retry else "ORIGINAL",
+                      "operator_declared_window_closed": True,
+                      "provider_ingress_verified": False, "trace_diagnostic": info,
+                      "status": "BLOCKED"}
+            if pair is not None:
+                trace, raw, alias = pair
+                write_once(root, folder / "live-session.snapshot", trace)
+                write_once(root, folder / "live-session-alias.snapshot", alias)
+                evidence = {"capture_source": "SESSION_TRACE_RECOVERY",
+                            "automatic_session_extraction_observed": True,
+                            "completion_evidence": "POST_CLOSE_TWO_AGREEING_DONE_TRACES",
+                            "provider_terminal_event_verified": False,
+                            "provider_ingress_verified": False,
+                            "script_submitted_model_requests": 0,
+                            "session_sha256": digest(trace), "alias_sha256": digest(alias),
+                            "window_close_status": "OPERATOR_CONFIRMED_CLOSED"}
+                # Write evidence first so an interruption cannot produce a
+                # CAPTURED receipt without its validation data.
+                write_once(root, folder / "live-pilot.json", json_bytes(evidence))
+                status = capture(root, base, job, raw, None, source="SESSION_TRACE_RECOVERY")
+                result["status"] = status
+                result["elapsed_seconds"] = None
+                result["response_sha256"] = digest(raw)
+            raw_result = json_bytes(result)
+            write_once(root, folder / ("live-recovery-" + digest(raw_result)[:24] + ".json"), raw_result)
+            return result
+        finally:
+            lock.unlink()
+    finally:
+        global_lock.unlink()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe")
+    live_recovery = sub.add_parser("recover-live-job")
+    live_recovery.add_argument("--root", required=True)
+    live_recovery.add_argument("--batch", required=True)
+    live_recovery.add_argument("--job", required=True)
+    live_recovery.add_argument("--confirm-closed", action="store_true")
     source_check = sub.add_parser("lecture-source-check")
     source_check.add_argument("--source-root", required=True)
     source_check.add_argument("--manifest", required=True)
@@ -1705,6 +1888,10 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command == "recover-live-job":
+            result = recover_live_job(args.root, args.batch, args.job, operator_closed=args.confirm_closed)
+            print(json_bytes(result).decode("utf-8"), end="")
+            return 0 if result["status"] in ("CAPTURED", "ALREADY_CAPTURED") else 2
         elif args.command == "lecture-import":
             result = import_lecture_assets(args.source_root, args.manifest, args.approved_media_root)
         elif args.command == "lecture-source-check":
@@ -1766,6 +1953,9 @@ def main(argv=None):
             result = report(args.root, args.batch)
         print(json_bytes(result).decode("utf-8"), end="")
         return 0
+    except KeyboardInterrupt:
+        print("WP1_BLOCKED:INTERRUPTED_PRESERVE_EXISTING_CLAIM_DO_NOT_RESUBMIT", file=sys.stderr)
+        return 2
     except (BatchError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
         # Exceptions from local tools may contain private paths. Never print them.
         print("WP1_BLOCKED:" + public_error_code(exc),

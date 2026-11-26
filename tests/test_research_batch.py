@@ -645,6 +645,66 @@ class ResearchBatchTests(unittest.TestCase):
                 b.authorize_clipboard_recovery(root, base, plan, job, None)
         self.assertFalse(b.safe_path(root, folder / "clipboard-recovery.json").exists())
 
+    def test_agreeing_trace_aliases_accept_completed_intermediate_planner_only(self):
+        session = self.root / "session"
+        session.mkdir()
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        user = {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE",
+                "content":b.PROMPT,"media":[{}]}
+        final = {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}
+        thought = dict(final, content="synthetic intermediate text")
+        encode = lambda rows: b"\n".join(b.json_bytes(row).strip().replace(b"\n", b" ") for row in rows)
+        a, c = encode([user,thought,final]), encode([user,final])
+        (session / "transcript_full.jsonl").write_bytes(a)
+        (session / "transcript.jsonl").write_bytes(c)
+        pair, info = b.read_agreeing_pair(session)
+        self.assertEqual(pair, (a, raw, c))
+        self.assertFalse(info["hashes_equal"])
+        (session / "transcript_full.jsonl").write_bytes(encode([user,final,final]))
+        self.assertIsNone(b.read_agreeing_pair(session)[0])
+        (session / "transcript_full.jsonl").write_bytes(encode([user,dict(thought,tool_calls=[{}]),final]))
+        self.assertIsNone(b.read_agreeing_pair(session)[0])
+        (session / "transcript_full.jsonl").write_bytes(encode([user,dict(thought,type="GENERIC"),final]))
+        self.assertIsNone(b.read_agreeing_pair(session)[0])
+
+    def test_recover_interrupted_live_job_uses_recovery_baseline_no_submission(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        (brain / "abandoned").mkdir(parents=True)
+        (brain / "new").mkdir()
+        b.claim(root, base, job)
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.persist_session_baseline(root, folder)
+        old = b.read_bytes(b.safe_path(root, folder / "session-baseline.json"))
+        b.write_once(root, folder / "clipboard-recovery.json",
+                     b.json_bytes({"job_id":job["id"],"prior_baseline_sha256":b.digest(old)}))
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, {"abandoned"})):
+            b.persist_session_baseline(root, folder, filename="session-baseline-recovery.json")
+        raw = b'{"transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'
+        trace = b"\n".join(json.dumps(row).encode() for row in (
+            {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","content":b.PROMPT,"media":[{}]},
+            {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":raw.decode()}))
+        for name in ("transcript_full.jsonl","transcript.jsonl"):
+            (brain / "new" / name).write_bytes(trace)
+        (brain / "abandoned" / "transcript_full.jsonl").write_bytes(b"private")
+        with patch.object(b,"brain_root",return_value=brain), patch.object(
+                b,"fresh_brain_dirs",return_value=(brain,{"new","abandoned"})), patch.object(
+                b,"gui_context",side_effect=AssertionError("no GUI")), patch.object(
+                b.subprocess,"run",side_effect=AssertionError("no external process")):
+            result = b.recover_live_job(root,bid,job["id"],operator_closed=True)
+            self.assertEqual(result["status"],"CAPTURED")
+            self.assertEqual(result["model_requests"],0)
+            self.assertEqual(result["baseline_kind"],"CLIPBOARD_RECOVERY")
+            self.assertEqual(b.recover_live_job(root,bid,job["id"],operator_closed=True)["status"],
+                             "ALREADY_CAPTURED")
+        row=b.report(root,bid)["jobs"][0]
+        self.assertIsNone(row["elapsed_seconds"])
+        self.assertEqual(row["capture_source"],"SESSION_TRACE_RECOVERY")
+        self.assertEqual(b.report(root,bid)["reserved_attempts"],1)
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
