@@ -377,3 +377,12 @@ receipt with elapsed=null (actual timing unavailable). Otherwise emit only
 allowlisted trace structure and stop. Resume the original live-batch only
 after recovery succeeds. The capture remains review-required; no provider
 ingress or independent accuracy claim is made.
+
+If the post-close two-trace recovery cannot extract a final response,
+the owner may explicitly supply a private UTF-8 JSON reconstruction of
+the already observed TUI response via --operator-response RELATIVE_PATH.
+This is a last resort, never represented as a session capture or exact
+provider bytes. A valid correlated trace contradicting it blocks recovery.
+Its separate immutable snapshot/receipt is verified before resuming
+later jobs. Keep elapsed time null and compare accuracy as provisional
+operator-supplied evidence. Do not include private response text in Git.

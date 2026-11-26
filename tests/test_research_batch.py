@@ -705,6 +705,54 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(row["capture_source"],"SESSION_TRACE_RECOVERY")
         self.assertEqual(b.report(root,bid)["reserved_attempts"],1)
 
+    def test_operator_reconstruction_is_distinct_and_reusable_without_trace(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        brain.mkdir()
+        b.claim(root, base, job)
+        with patch.object(b,"fresh_brain_dirs",return_value=(brain,set())):
+            b.persist_session_baseline(root,folder)
+        supplied = b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        b.write_once(root,Path("supplied.json"),supplied)
+        with patch.object(b,"brain_root",return_value=brain), patch.object(
+                b,"fresh_brain_dirs",return_value=(brain,set())), patch.object(
+                b.subprocess,"run",side_effect=AssertionError("no external process")):
+            result=b.recover_live_job(root,bid,job["id"],operator_closed=True,
+                                      operator_response="supplied.json")
+        self.assertEqual(result["status"],"CAPTURED")
+        self.assertEqual(result["capture_source"],"OPERATOR_TUI_RECONSTRUCTION")
+        row=b.report(root,bid)["jobs"][0]
+        self.assertIsNone(row["elapsed_seconds"])
+        evidence=b.completed_live_job(root,base,job,row)
+        self.assertFalse(evidence["original_provider_bytes_verified"])
+        self.assertFalse(evidence["automatic_session_extraction_observed"])
+
+    def test_operator_reconstruction_rejects_conflicting_valid_trace(self):
+        bid=self.prepare()
+        root,base,plan=b.load_plan(self.root,bid)
+        job=plan["jobs"][0]
+        folder=base / job["id"]
+        brain=root / "brain"
+        (brain / "new").mkdir(parents=True)
+        b.claim(root,base,job)
+        with patch.object(b,"fresh_brain_dirs",return_value=(brain,set())):
+            b.persist_session_baseline(root,folder)
+        supplied=b.json_bytes({"transcript":"alpha","uncertainties":[],"status":"COMPLETE"})
+        other=b.json_bytes({"transcript":"different","uncertainties":[],"status":"COMPLETE"})
+        b.write_once(root,Path("supplied.json"),supplied)
+        trace=b"\n".join(json.dumps(row).encode() for row in (
+            {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE","content":b.PROMPT,"media":[{}]},
+            {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE","content":other.decode()}))
+        (brain / "new" / "transcript_full.jsonl").write_bytes(trace)
+        with patch.object(b,"brain_root",return_value=brain), patch.object(
+                b,"fresh_brain_dirs",return_value=(brain,{"new"})):
+            with self.assertRaisesRegex(b.BatchError,"OPERATOR_RECONSTRUCTION_TRACE_CONFLICT"):
+                b.recover_live_job(root,bid,job["id"],operator_closed=True,operator_response="supplied.json")
+        self.assertFalse(b.safe_path(root,folder / "response.txt").exists())
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

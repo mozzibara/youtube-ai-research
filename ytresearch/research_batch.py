@@ -332,7 +332,8 @@ def capability_probe():
 
 def capture(root, base, job, raw, elapsed, *, source="DIRECT_TUI_CLIPBOARD"):
     """Preserve captured bytes before parsing. Never replace a previous capture."""
-    if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY"):
+    if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY",
+                      "OPERATOR_TUI_RECONSTRUCTION"):
         raise BatchError("INVALID_CAPTURE_SOURCE")
     folder = base / job["id"]
     claim_path = safe_path(root, folder / "claim.json")
@@ -1649,11 +1650,22 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False):
 def completed_live_job(root, base, job, row, *, confirm_closed=False):
     """Validate saved capture before reuse; never resubmit a claimed job."""
     if row["status"] != "CAPTURED" or row.get("capture_source") not in (
-            "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY"):
+            "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY", "OPERATOR_TUI_RECONSTRUCTION"):
         raise BatchError("UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY")
     folder = base / job["id"]
-    trace = read_bytes(safe_path(root, folder / "live-session.snapshot"), MAX_LOG)
     response = read_bytes(safe_path(root, folder / "response.txt"))
+    if row.get("capture_source") == "OPERATOR_TUI_RECONSTRUCTION":
+        evidence = parse_json(read_bytes(safe_path(root, folder / "live-pilot.json")))
+        supplied = read_bytes(safe_path(root, folder / "operator-response.snapshot"))
+        if (evidence.get("capture_source") != "OPERATOR_TUI_RECONSTRUCTION"
+                or evidence.get("response_sha256") != digest(response)
+                or supplied != response
+                or evidence.get("operator_declared_window_closed") is not True
+                or evidence.get("original_provider_bytes_verified") is not False):
+            raise BatchError("OPERATOR_RECONSTRUCTION_EVIDENCE_MISMATCH")
+        validate_response(response)
+        return evidence
+    trace = read_bytes(safe_path(root, folder / "live-session.snapshot"), MAX_LOG)
     if compare_capture_candidate(session_log_candidate(trace, live=True), response) not in (
             "EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
         raise BatchError("LIVE_CAPTURE_TRACE_MISMATCH")
@@ -1745,7 +1757,7 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
         global_lock.unlink()
 
 
-def recover_live_job(root, bid, job_id, *, operator_closed):
+def recover_live_job(root, bid, job_id, *, operator_closed, operator_response=None):
     """Post-close recovery of an existing claim; never launch or resubmit."""
     if not operator_closed:
         raise BatchError("OPERATOR_CLOSE_CONFIRMATION_REQUIRED")
@@ -1817,6 +1829,34 @@ def recover_live_job(root, bid, job_id, *, operator_closed):
                 result["status"] = status
                 result["elapsed_seconds"] = None
                 result["response_sha256"] = digest(raw)
+            elif operator_response is not None:
+                if info["status"] == "TRACE_FINAL_RESPONSE_CONFLICT":
+                    raise BatchError("OPERATOR_RECONSTRUCTION_CONFLICTING_TRACES")
+                supplied = read_bytes(safe_path(root, operator_response))
+                validate_response(supplied)
+                # Reject any independently valid correlated final that
+                # contradicts the supplied reconstruction. No guessing.
+                if session is not None:
+                    for path in scoped_session_candidates(session):
+                        candidate = session_log_candidate(read_bytes(path, MAX_LOG), live=True)
+                        if candidate is not None and compare_capture_candidate(candidate, supplied) not in (
+                                "EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH"):
+                            raise BatchError("OPERATOR_RECONSTRUCTION_TRACE_CONFLICT")
+                write_once(root, folder / "operator-response.snapshot", supplied)
+                evidence = {"capture_source": "OPERATOR_TUI_RECONSTRUCTION",
+                            "operator_declared_window_closed": True,
+                            "operator_declared_same_job_response": True,
+                            "original_provider_bytes_verified": False,
+                            "automatic_session_extraction_observed": False,
+                            "provider_ingress_verified": False,
+                            "response_sha256": digest(supplied),
+                            "window_close_status": "OPERATOR_CONFIRMED_CLOSED"}
+                write_once(root, folder / "live-pilot.json", json_bytes(evidence))
+                result["status"] = capture(root, base, job, supplied, None,
+                                           source="OPERATOR_TUI_RECONSTRUCTION")
+                result["response_sha256"] = digest(supplied)
+                result["capture_source"] = "OPERATOR_TUI_RECONSTRUCTION"
+                result["elapsed_seconds"] = None
             raw_result = json_bytes(result)
             write_once(root, folder / ("live-recovery-" + digest(raw_result)[:24] + ".json"), raw_result)
             return result
@@ -1835,6 +1875,7 @@ def main(argv=None):
     live_recovery.add_argument("--batch", required=True)
     live_recovery.add_argument("--job", required=True)
     live_recovery.add_argument("--confirm-closed", action="store_true")
+    live_recovery.add_argument("--operator-response", help="Explicitly attest a private UTF-8 reconstructed TUI JSON response belongs to this existing job; fallback only")
     source_check = sub.add_parser("lecture-source-check")
     source_check.add_argument("--source-root", required=True)
     source_check.add_argument("--manifest", required=True)
@@ -1889,7 +1930,8 @@ def main(argv=None):
         if args.command == "probe":
             result = capability_probe()
         elif args.command == "recover-live-job":
-            result = recover_live_job(args.root, args.batch, args.job, operator_closed=args.confirm_closed)
+            result = recover_live_job(args.root, args.batch, args.job, operator_closed=args.confirm_closed,
+                                      operator_response=args.operator_response)
             print(json_bytes(result).decode("utf-8"), end="")
             return 0 if result["status"] in ("CAPTURED", "ALREADY_CAPTURED") else 2
         elif args.command == "lecture-import":
