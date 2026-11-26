@@ -333,3 +333,22 @@ Use the returned relative manifest for lecture-batch. No AGY calls occur
 during import. This is not a permission expansion of the normal validator.
 
     python -m ytresearch.research_batch lecture-import --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json --approved-media-root D:\old-private\data\videos
+
+### Clipboard staging failure and one-time guided recovery
+
+A local CF_HDROP set/read failure before Alt+V and prompt insertion does not
+settle the existing possible-submission claim. Retry only the local helper
+up to three times (never paste or submit again). Safe failure markers avoid
+printing local paths. The ordinary live-batch resume still refuses every
+unsettled claim. For a specifically observed CLIPBOARD_FILE_DROP_FAILED,
+the owner may close the failed experiment window, verify they never pressed
+Enter/submitted, and explicitly identify the first unfinished claimed job
+with --recover-clipboard-job JOB_ID. Do not use for timeouts or any
+uncertain submission. The controller requires the original claim and
+baseline, a single prior launcher, no visible old titled window, at most
+one new session and no nonempty known trace. Missing traces are not proof
+of no provider request. The owner's attestation is recorded in an immutable
+one-time receipt, the old claim/baseline remain, and a separate baseline
+is used for the recovered attempt. A recovery interruption is not retried.
+The reserved job counts once toward the original total cap; no automated
+submission is performed. Completed jobs are validated and reused.

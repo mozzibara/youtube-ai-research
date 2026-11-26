@@ -593,6 +593,58 @@ class ResearchBatchTests(unittest.TestCase):
             b.import_lecture_assets(self.root,"data/pilot.json",approved)
         self.assertFalse((self.root / "data/wp2-imports").exists())
 
+    def test_file_drop_retries_only_local_helper(self):
+        from types import SimpleNamespace
+        fail = SimpleNamespace(returncode=4, stdout=b"FILE_DROP_SET_OR_READ_FAILED\n")
+        ok = SimpleNamespace(returncode=0, stdout=b"FILE_DROP_READY\r\n")
+        with patch.object(b.subprocess, "run", side_effect=[fail, fail, ok]) as run, patch.object(
+                b.time, "sleep"):
+            b.prepare_file_drop("helper", "media")
+        self.assertEqual(run.call_count, 3)
+        invalid = SimpleNamespace(returncode=2, stdout=b"FILE_DROP_INPUT_INVALID\n")
+        with patch.object(b.subprocess, "run", return_value=invalid) as run:
+            with self.assertRaisesRegex(b.BatchError, "CLIPBOARD_FILE_DROP_INPUT_INVALID"):
+                b.prepare_file_drop("helper", "media")
+        self.assertEqual(run.call_count, 1)
+
+    def test_clipboard_recovery_preserves_claim_and_is_one_time(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        (brain / "new").mkdir(parents=True)
+        b.claim(root, base, job)
+        b.write_once(root, folder / "AGY_WP1_0123456789AB.ps1", b"synthetic")
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.persist_session_baseline(root, folder)
+        old = b.read_bytes(b.safe_path(root, folder / "claim.json"))
+        with patch("tools.agy_media_probe.windows", return_value=[]), patch.object(
+                b, "fresh_brain_dirs", return_value=(brain, {"new"})):
+            b.authorize_clipboard_recovery(root, base, plan, job, None)
+            with self.assertRaisesRegex(b.BatchError, "CLIPBOARD_RECOVERY_ALREADY_USED"):
+                b.authorize_clipboard_recovery(root, base, plan, job, None)
+        self.assertEqual(b.read_bytes(b.safe_path(root, folder / "claim.json")), old)
+        self.assertEqual(b.report(root, bid)["reserved_attempts"], 1)
+
+    def test_clipboard_recovery_blocks_any_nonempty_trace(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        (brain / "new").mkdir(parents=True)
+        (brain / "new" / "transcript.jsonl").write_bytes(b"nonempty")
+        b.claim(root, base, job)
+        b.write_once(root, folder / "AGY_WP1_0123456789AB.ps1", b"synthetic")
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.persist_session_baseline(root, folder)
+        with patch("tools.agy_media_probe.windows", return_value=[]), patch.object(
+                b, "fresh_brain_dirs", return_value=(brain, {"new"})):
+            with self.assertRaisesRegex(b.BatchError, "CLIPBOARD_RECOVERY_SESSION_TRACE_PRESENT"):
+                b.authorize_clipboard_recovery(root, base, plan, job, None)
+        self.assertFalse(b.safe_path(root, folder / "clipboard-recovery.json").exists())
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
