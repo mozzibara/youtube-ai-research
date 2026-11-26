@@ -300,3 +300,18 @@ and zero model requests. Do not repair hashes, change asset paths or bypass
 the original manifest to make it pass. If the check succeeds, the existing
 lecture-batch command remains the normal continuation. A failed check must
 stop before opening AGY.
+
+### Numeric legacy pilot manifest compatibility (WP2 only)
+
+The historical pilot generator used integer schema_version 1 and
+OFFLINE_INPUT_VERIFIED status. The newer manual-verbatim validator rejects
+explicit numeric versions by default. WP2 source validation now explicitly
+opts into this one historical format, without changing the manifest on disk.
+It remains a legacy four-role contract, not verbatim_single_v1, and requires
+the verified 77-entry source ledger, registered video, all four assets,
+byte lengths, SHA-256 and existing path boundaries. Boolean, floating-point,
+string or other numeric versions, conflicting contract fields and wrong
+status are rejected. All other callers retain the old default behavior.
+Missing/invalid legacy ledgers receive distinct safe error codes; never
+manufacture a registry or replace recorded hashes to pass validation.
+No source media, manifests or private ledger are committed.

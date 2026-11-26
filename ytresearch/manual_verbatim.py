@@ -44,6 +44,7 @@ class _ValidatedContext:
     found: dict[str, Path]
     validated_assets: dict[str, dict]
     out_dir: Path
+    manifest_contract: str = "LEGACY"
 
 
 def _is_symlink_or_junction(p: Path) -> bool:
@@ -197,7 +198,7 @@ def compute_input_digest(schema: str, video_id: str, assets: dict[str, dict]) ->
     return hashlib.sha256(raw).hexdigest()
 
 
-def _load_validated_context(root, manifest_path) -> _ValidatedContext:
+def _load_validated_context(root, manifest_path, *, allow_legacy_numeric_v1=False) -> _ValidatedContext:
     root_resolved = _validate_runtime_root(root)
     raw_manifest = _resolve_manifest_path(root_resolved, manifest_path)
     if _is_inside_git_worktree(raw_manifest):
@@ -226,16 +227,41 @@ def _load_validated_context(root, manifest_path) -> _ValidatedContext:
     if has_schema and has_contract and schema_version != contract:
         raise VerbatimError("SCHEMA_CONFLICT")
 
-    if has_schema or has_contract:
+    numeric_v1 = (allow_legacy_numeric_v1 and has_schema and not has_contract
+                  and type(schema_version) is int and schema_version == 1)
+    if numeric_v1:
+        # Historical owner-created pilot format. Preserve legacy registry
+        # and all four required asset roles. Do not reinterpret as single input.
+        if manifest.get("status") != "OFFLINE_INPUT_VERIFIED":
+            raise VerbatimError("LEGACY_V1_STATUS_INVALID")
+        is_single = False
+        manifest_contract = "LEGACY_NUMERIC_V1"
+    elif has_schema or has_contract:
         raw_val = schema_version if has_schema else contract
         if not isinstance(raw_val, str) or raw_val != SINGLE_INPUT_CONTRACT:
             raise VerbatimError("SCHEMA_UNSUPPORTED")
         is_single = True
+        manifest_contract = "SINGLE"
     else:
         is_single = False
+        manifest_contract = "LEGACY"
 
     if not is_single:
-        if vid not in {x["video_id"] for x in read_source_ledger(root_resolved, expected=77)["videos"]}:
+        if numeric_v1:
+            active = root_resolved / "data" / "active_playlist.json"
+            fallback = root_resolved / "research" / "index.json"
+            for ledger_path in (active, fallback):
+                if ledger_path.exists() or _is_symlink_or_junction(ledger_path):
+                    _check_safe_path(ledger_path, root_resolved)
+            try:
+                ledger = read_source_ledger(root_resolved, expected=77)
+            except FileNotFoundError as exc:
+                raise VerbatimError("LEGACY_SOURCE_LEDGER_MISSING") from exc
+            except (ValueError, OSError, TypeError, KeyError) as exc:
+                raise VerbatimError("LEGACY_SOURCE_LEDGER_INVALID") from exc
+        else:
+            ledger = read_source_ledger(root_resolved, expected=77)
+        if vid not in {x["video_id"] for x in ledger["videos"]}:
             raise VerbatimError("VIDEO_NOT_REGISTERED")
 
     assets = manifest.get("assets")
@@ -330,6 +356,7 @@ def _load_validated_context(root, manifest_path) -> _ValidatedContext:
         found=found,
         validated_assets=validated_asset_info,
         out_dir=out_dir,
+        manifest_contract=manifest_contract,
     )
 
 

@@ -476,6 +476,76 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("WP1_BLOCKED:ASSET_OUTSIDE_RUNTIME", error.getvalue())
 
+    def numeric_legacy_fixture(self):
+        (self.root / "data").mkdir()
+        (self.root / "research").mkdir()
+        rows = [{"video_id": f"v{i:010d}", "playlist_position": i,
+                 "source_id": f"S{i:03d}"} for i in range(1, 78)]
+        ledger = self.root / "research" / "index.json"
+        ledger.write_bytes(b.json_bytes({"source_count": 77, "sources": rows}))
+        asset = self.root / "source.mp4"
+        mf = {"schema_version": 1, "status": "OFFLINE_INPUT_VERIFIED",
+              "video_id": rows[0]["video_id"],
+              "assets": {role: {"path": "source.mp4", "size_bytes": asset.stat().st_size,
+                                "sha256": b.sha(asset)}
+                         for role in ("primary_video", "highres_video", "audio", "subtitle_json3")}}
+        path = self.root / "data" / "pilot.json"
+        path.write_bytes(b.json_bytes(mf))
+        return path, mf, ledger
+
+    def test_lecture_numeric_legacy_v1_preserves_original_and_default_contract(self):
+        path, mf, ledger = self.numeric_legacy_fixture()
+        original = path.read_bytes()
+        with patch.object(b.subprocess, "run", side_effect=AssertionError("no process")), patch.object(
+                b, "gui_context", side_effect=AssertionError("no GUI")):
+            result = b.lecture_source_check(self.root, "data/pilot.json")
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(result["manifest_contract"], "LEGACY_NUMERIC_V1")
+        self.assertEqual(result["verified_asset_count"], 4)
+        self.assertEqual(path.read_bytes(), original)
+        with self.assertRaisesRegex(b.VerbatimError, "SCHEMA_UNSUPPORTED"):
+            b._load_validated_context(self.root.resolve(), path.resolve())
+
+    def test_lecture_numeric_legacy_v1_requires_registry_roles_and_hashes(self):
+        path, mf, ledger = self.numeric_legacy_fixture()
+        original = ledger.read_bytes()
+        ledger.unlink()
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "LEGACY_SOURCE_LEDGER_MISSING")
+        ledger.write_bytes(original)
+        mf["video_id"] = "unregisterd"
+        path.write_bytes(b.json_bytes(mf))
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "VIDEO_NOT_REGISTERED")
+        mf["video_id"] = "v0000000001"
+        audio = mf["assets"].pop("audio")
+        path.write_bytes(b.json_bytes(mf))
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "ASSET_ROLES_INVALID")
+        mf["assets"]["audio"] = audio
+        audio["sha256"] = "0" * 64
+        path.write_bytes(b.json_bytes(mf))
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "ASSET_HASH_MISMATCH")
+
+    def test_lecture_numeric_legacy_v1_rejects_ambiguous_schema_and_status(self):
+        path, mf, ledger = self.numeric_legacy_fixture()
+        for unsupported in (True, 1.0, "1", 2):
+            mf["schema_version"] = unsupported
+            path.write_bytes(b.json_bytes(mf))
+            self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                             "SCHEMA_UNSUPPORTED")
+        mf["schema_version"] = 1
+        mf["contract"] = "verbatim_single_v1"
+        path.write_bytes(b.json_bytes(mf))
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "SCHEMA_CONFLICT")
+        del mf["contract"]
+        mf["status"] = "UNVERIFIED"
+        path.write_bytes(b.json_bytes(mf))
+        self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
+                         "LEGACY_V1_STATUS_INVALID")
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

@@ -1238,7 +1238,8 @@ VERBATIM_PUBLIC_CODES = frozenset({
     "VIDEO_NOT_REGISTERED", "ASSET_ROLES_INVALID", "ASSET_INVALID",
     "ASSET_UNAVAILABLE", "ASSET_SIZE_MISMATCH", "ASSET_HASH_INVALID",
     "ASSET_HASH_MISMATCH", "EXECUTION_MANIFEST_TAMPERED",
-    "EXECUTION_MANIFEST_MISSING",
+    "EXECUTION_MANIFEST_MISSING", "LEGACY_V1_STATUS_INVALID",
+    "LEGACY_SOURCE_LEDGER_MISSING", "LEGACY_SOURCE_LEDGER_INVALID",
 })
 
 
@@ -1253,7 +1254,7 @@ def public_error_code(exc):
 def lecture_source_context(source_root, manifest):
     source_root = safe_root(source_root)
     manifest = safe_path(source_root, manifest)
-    return _load_validated_context(source_root, manifest)
+    return _load_validated_context(source_root, manifest, allow_legacy_numeric_v1=True)
 
 
 def lecture_source_check(source_root, manifest):
@@ -1264,7 +1265,7 @@ def lecture_source_check(source_root, manifest):
         return {"status": "BLOCKED", "error_code": public_error_code(exc),
                 "source_manifest_assets_verified": False, "model_requests": 0}
     return {"status": "PASS", "source_manifest_assets_verified": True,
-            "manifest_contract": "SINGLE" if ctx.is_single else "LEGACY",
+            "manifest_contract": ctx.manifest_contract,
             "verified_asset_roles": sorted(ctx.validated_assets),
             "verified_asset_count": len(ctx.validated_assets), "model_requests": 0}
 
