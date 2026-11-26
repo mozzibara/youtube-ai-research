@@ -18,7 +18,7 @@ import uuid
 
 from .manual_verbatim import (
     _is_symlink_or_junction, _validate_runtime_root, _load_validated_context,
-    create_immutable, sha,
+    VerbatimError, create_immutable, sha,
 )
 
 MODELS = {
@@ -1228,14 +1228,53 @@ def caption_proxy_window(raw, start, seconds):
                               "scope": "OVERLAPPING_EVENTS_UNREVIEWED_NOT_VERBATIM_TRUTH"}
 
 
+# Explicit codes from the source validator only; never emit arbitrary exception
+# strings, asset names, paths, manifest contents, or subprocess stderr.
+VERBATIM_PUBLIC_CODES = frozenset({
+    "PUBLIC_GIT_RUNTIME_FORBIDDEN", "PATH_TRAVERSAL_FORBIDDEN",
+    "MANIFEST_OUTSIDE_RUNTIME", "ASSET_OUTSIDE_RUNTIME", "OUTPUT_OUTSIDE_RUNTIME",
+    "OUTPUT_SYMLINK", "MANIFEST_NOT_FOUND", "MANIFEST_INVALID",
+    "VIDEO_ID_INVALID", "SCHEMA_CONFLICT", "SCHEMA_UNSUPPORTED",
+    "VIDEO_NOT_REGISTERED", "ASSET_ROLES_INVALID", "ASSET_INVALID",
+    "ASSET_UNAVAILABLE", "ASSET_SIZE_MISMATCH", "ASSET_HASH_INVALID",
+    "ASSET_HASH_MISMATCH", "EXECUTION_MANIFEST_TAMPERED",
+    "EXECUTION_MANIFEST_MISSING",
+})
+
+
+def public_error_code(exc):
+    if isinstance(exc, BatchError):
+        return str(exc)
+    if isinstance(exc, VerbatimError):
+        return str(exc) if str(exc) in VERBATIM_PUBLIC_CODES else "VERBATIM_VALIDATION_FAILED"
+    return type(exc).__name__
+
+
+def lecture_source_context(source_root, manifest):
+    source_root = safe_root(source_root)
+    manifest = safe_path(source_root, manifest)
+    return _load_validated_context(source_root, manifest)
+
+
+def lecture_source_check(source_root, manifest):
+    """Read-only, same validator as lecture preparation; no asset discovery."""
+    try:
+        ctx = lecture_source_context(source_root, manifest)
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        return {"status": "BLOCKED", "error_code": public_error_code(exc),
+                "source_manifest_assets_verified": False, "model_requests": 0}
+    return {"status": "PASS", "source_manifest_assets_verified": True,
+            "manifest_contract": "SINGLE" if ctx.is_single else "LEGACY",
+            "verified_asset_roles": sorted(ctx.validated_assets),
+            "verified_asset_count": len(ctx.validated_assets), "model_requests": 0}
+
+
 def prepare_lecture(root, source_root, manifest, start, seconds, models=None, trial="lecture-1"):
     """Read only an explicitly supplied prior private manifest and its validated assets."""
     if type(start) is not int or not 0 <= start <= 86400 or type(seconds) is not int or not 30 <= seconds <= 120:
         raise BatchError("LECTURE_WINDOW_OUT_OF_RANGE")
     root = safe_root(root)
-    source_root = safe_root(source_root)
-    manifest = safe_path(source_root, manifest)
-    ctx = _load_validated_context(source_root, manifest)
+    ctx = lecture_source_context(source_root, manifest)
     source = ctx.found["primary_video"]
     audio = ctx.found.get("audio")
     profile = {"schema": "wp2_lecture_clip_v1", "source_assets": ctx.validated_assets,
@@ -1408,6 +1447,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe")
+    source_check = sub.add_parser("lecture-source-check")
+    source_check.add_argument("--source-root", required=True)
+    source_check.add_argument("--manifest", required=True)
     prep = sub.add_parser("prepare")
     prep.add_argument("--root", required=True)
     prep.add_argument("--media", required=True)
@@ -1453,6 +1495,10 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command == "lecture-source-check":
+            result = lecture_source_check(args.source_root, args.manifest)
+            print(json_bytes(result).decode("utf-8"), end="")
+            return 0 if result["status"] == "PASS" else 2
         elif args.command in ("lecture-batch", "live-batch"):
             if not args.authorize_guided:
                 raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
@@ -1462,6 +1508,7 @@ def main(argv=None):
                 if args.max_calls > len(args.models or MODELS):
                     raise BatchError("LIMIT_EXCEEDS_PLAN")
                 validate_live_proofs(args.root, args.paired_batch, args.pilot_batch)
+                print("LECTURE_SOURCE_VALIDATION_BEGIN", flush=True)
                 bid, source_info = prepare_lecture(
                     args.root, args.source_root, args.manifest, args.start_seconds,
                     args.duration_seconds, args.models, args.trial)
@@ -1508,7 +1555,7 @@ def main(argv=None):
         return 0
     except (BatchError, OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
         # Exceptions from local tools may contain private paths. Never print them.
-        print("WP1_BLOCKED:" + (str(exc) if isinstance(exc, BatchError) else type(exc).__name__),
+        print("WP1_BLOCKED:" + public_error_code(exc),
               file=sys.stderr)
         return 2
 

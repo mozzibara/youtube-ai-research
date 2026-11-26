@@ -283,3 +283,20 @@ checked before reuse; no unsettled claim is retried. Only if the prior window
 has actually been closed, use --confirm-previous-closed. A global lock
 serializes this new live-batch mode; do not concurrently run legacy tools.
 All source/response artifacts remain private.
+
+### Lecture source validation diagnostics
+
+The first actual lecture attempt stopped with a generic VerbatimError before
+any model submission. Preserve the source validator's specific allowlisted
+codes (e.g. ASSET_HASH_MISMATCH, MANIFEST_NOT_FOUND), without exporting paths
+or arbitrary exception messages. No validation policy is relaxed. The new
+read-only command uses exactly the same source context validator as the
+lecture preparation path:
+
+    python -m ytresearch.research_batch lecture-source-check --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json
+
+It reports only status, a safe failure code or verified asset roles/count,
+and zero model requests. Do not repair hashes, change asset paths or bypass
+the original manifest to make it pass. If the check succeeds, the existing
+lecture-batch command remains the normal continuation. A failed check must
+stop before opening AGY.

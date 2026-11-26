@@ -429,6 +429,53 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(result["reserved_attempts"],2)
         self.assertEqual(result["jobs"][2]["status"],"PENDING")
 
+    def test_lecture_source_check_missing_manifest_and_integrity(self):
+        (self.root / "data").mkdir()
+        rel = "data/example.json"
+        info = b.lecture_source_check(self.root, rel)
+        self.assertEqual(info["error_code"], "MANIFEST_NOT_FOUND")
+        asset = self.root / "source.mp4"
+        mf = {"schema_version": "verbatim_single_v1", "video_id": "abcdefghijk",
+              "assets": {"primary_video": {"path": "source.mp4",
+                         "size_bytes": asset.stat().st_size, "sha256": b.sha(asset)}}}
+        (self.root / rel).write_bytes(b.json_bytes(mf))
+        with patch.object(b.subprocess, "run", side_effect=AssertionError("no process")), patch.object(
+                b, "gui_context", side_effect=AssertionError("no GUI")):
+            info = b.lecture_source_check(self.root, rel)
+            self.assertEqual(info["status"], "PASS")
+            self.assertEqual(info["verified_asset_roles"], ["primary_video"])
+            self.assertEqual(info["model_requests"], 0)
+            asset.write_bytes(b"X" * asset.stat().st_size)
+            info = b.lecture_source_check(self.root, rel)
+            self.assertEqual(info["error_code"], "ASSET_HASH_MISMATCH")
+            self.assertEqual(info["status"], "BLOCKED")
+
+    def test_verbatim_error_redaction_and_cli(self):
+        import contextlib
+        import io
+        self.assertEqual(b.public_error_code(b.VerbatimError("ASSET_SIZE_MISMATCH")),
+                         "ASSET_SIZE_MISMATCH")
+        self.assertEqual(b.public_error_code(b.VerbatimError("secret path")),
+                         "VERBATIM_VALIDATION_FAILED")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), patch.object(
+                b, "live_batch", side_effect=AssertionError("no model")):
+            rc = b.main(["lecture-source-check", "--source-root", str(self.root),
+                         "--manifest", "data/absent.json"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(json.loads(output.getvalue())["error_code"], "MANIFEST_NOT_FOUND")
+        error = io.StringIO()
+        with contextlib.redirect_stderr(error), patch.object(
+                b, "validate_live_proofs", return_value={}), patch.object(
+                b, "prepare_lecture", side_effect=b.VerbatimError("ASSET_OUTSIDE_RUNTIME")), patch.object(
+                b, "live_batch", side_effect=AssertionError("no model")):
+            rc = b.main(["lecture-batch", "--root", str(self.root), "--source-root",
+                         str(self.root), "--manifest", "data/example.json",
+                         "--paired-batch", "x", "--pilot-batch", "y",
+                         "--max-calls", "6", "--authorize-guided"])
+        self.assertEqual(rc, 2)
+        self.assertIn("WP1_BLOCKED:ASSET_OUTSIDE_RUNTIME", error.getvalue())
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),
