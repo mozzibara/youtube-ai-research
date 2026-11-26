@@ -546,6 +546,53 @@ class ResearchBatchTests(unittest.TestCase):
         self.assertEqual(b.lecture_source_check(self.root, "data/pilot.json")["error_code"],
                          "LEGACY_V1_STATUS_INVALID")
 
+    def external_media_fixture(self):
+        path, mf, ledger = self.numeric_legacy_fixture()
+        external = tempfile.TemporaryDirectory()
+        self.addCleanup(external.cleanup)
+        approved = Path(external.name).resolve() / "videos"
+        media = approved / mf["video_id"] / "media"
+        media.mkdir(parents=True)
+        for role, ext in (("primary_video",".mp4"), ("highres_video",".mp4"),
+                          ("audio",".m4a"), ("subtitle_json3",".json3")):
+            src = media / (role + ext)
+            src.write_bytes(role.encode())
+            mf["assets"][role] = {"path": str(src), "size_bytes": src.stat().st_size,
+                                  "sha256": b.sha(src)}
+        path.write_bytes(b.json_bytes(mf))
+        return path, mf, approved
+
+    def test_lecture_import_preserves_boundary_original_and_hashes(self):
+        path, mf, approved = self.external_media_fixture()
+        original = path.read_bytes()
+        self.assertEqual(b.lecture_source_check(self.root,"data/pilot.json")["error_code"],
+                         "ASSET_OUTSIDE_RUNTIME")
+        with patch.object(b.subprocess,"run",side_effect=AssertionError("no process")), patch.object(
+                b,"gui_context",side_effect=AssertionError("no GUI")):
+            result = b.import_lecture_assets(self.root,"data/pilot.json",approved)
+            self.assertEqual(result,b.import_lecture_assets(self.root,"data/pilot.json",approved))
+        self.assertEqual(result["verified_asset_count"],4)
+        self.assertEqual(result["model_requests"],0)
+        self.assertEqual(path.read_bytes(),original)
+        ctx = b.lecture_source_context(self.root,result["manifest"])
+        for role, item in mf["assets"].items():
+            self.assertTrue(ctx.found[role].is_relative_to(self.root.resolve()))
+            self.assertEqual(b.sha(ctx.found[role]),item["sha256"])
+            self.assertEqual(b.sha(Path(item["path"])),item["sha256"])
+
+    def test_lecture_import_rejects_wrong_source_and_tampered_asset_before_copy(self):
+        path,mf,approved = self.external_media_fixture()
+        mf["assets"]["audio"]["path"] = str(self.root / "source.mp4")
+        path.write_bytes(b.json_bytes(mf))
+        with self.assertRaisesRegex(b.BatchError,"IMPORT_ASSET_OUTSIDE_APPROVED_VIDEO_MEDIA"):
+            b.import_lecture_assets(self.root,"data/pilot.json",approved)
+        mf["assets"]["audio"]["path"] = str(approved / mf["video_id"] / "media" / "audio.m4a")
+        mf["assets"]["audio"]["sha256"] = "0"*64
+        path.write_bytes(b.json_bytes(mf))
+        with self.assertRaisesRegex(b.BatchError,"ASSET_HASH_MISMATCH"):
+            b.import_lecture_assets(self.root,"data/pilot.json",approved)
+        self.assertFalse((self.root / "data/wp2-imports").exists())
+
     def test_cli_run_requires_authorization(self):
         with patch.object(b, "guided_run", side_effect=AssertionError("live forbidden")):
             self.assertEqual(b.main(["run", "--root", str(self.root),

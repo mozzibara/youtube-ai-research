@@ -315,3 +315,21 @@ status are rejected. All other callers retain the old default behavior.
 Missing/invalid legacy ledgers receive distinct safe error codes; never
 manufacture a registry or replace recorded hashes to pass validation.
 No source media, manifests or private ledger are committed.
+
+### Explicit legacy media import
+
+The historical pilot manifest may point to media in the old private project's
+data/videos tree rather than the standalone Runtime. Its ordinary source
+check correctly rejects ASSET_OUTSIDE_RUNTIME. The new offline lecture-import
+command accepts an explicitly named media root and reads only the four exact
+manifest asset paths under that video's media directory. It validates the
+legacy ledger, paths, extensions, sizes and recorded hashes before writing.
+It copies bytes into data/wp2-imports/<manifest digest>/assets in the
+approved non-Git Runtime, verifies the copies, and writes a distinct minimal
+legacy manifest and receipt. No overwrite, original hardlinks, arbitrary
+file discovery, or source edits. The unchanged lecture source validator
+must accept the resulting manifest. Repeated import reuses verified copies.
+Use the returned relative manifest for lecture-batch. No AGY calls occur
+during import. This is not a permission expansion of the normal validator.
+
+    python -m ytresearch.research_batch lecture-import --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json --approved-media-root D:\old-private\data\videos

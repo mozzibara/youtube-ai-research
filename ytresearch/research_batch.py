@@ -18,8 +18,9 @@ import uuid
 
 from .manual_verbatim import (
     _is_symlink_or_junction, _validate_runtime_root, _load_validated_context,
-    VerbatimError, create_immutable, sha,
+    VerbatimError, ROLES, VIDEO_RE, create_immutable, sha,
 )
+from .research_state import read_source_ledger
 
 MODELS = {
     "gemini-3.8-flash-medium": "medium",
@@ -1270,6 +1271,126 @@ def lecture_source_check(source_root, manifest):
             "verified_asset_count": len(ctx.validated_assets), "model_requests": 0}
 
 
+def import_lecture_assets(source_root, manifest, approved_media_root):
+    """Explicit local copy adapter for historical manifests referencing external media.
+
+    Read only the four manifest paths under the named video's media directory.
+    Keep the existing ledger/asset validation contract; no arbitrary file discovery,
+    external runtime outputs, link-based imports or edits to original evidence.
+    """
+    root = safe_root(source_root)
+    original = safe_path(root, manifest)
+    if not original.is_relative_to(root / "data"):
+        raise BatchError("MANIFEST_OUTSIDE_RUNTIME")
+    raw = read_bytes(original)
+    doc = parse_json(raw)
+    if not isinstance(doc, dict):
+        raise BatchError("MANIFEST_INVALID")
+    if (type(doc.get("schema_version")) is not int or doc["schema_version"] != 1
+            or "contract" in doc or doc.get("status") != "OFFLINE_INPUT_VERIFIED"):
+        raise BatchError("IMPORT_REQUIRES_LEGACY_NUMERIC_V1")
+    vid = doc.get("video_id")
+    if not isinstance(vid, str) or not VIDEO_RE.fullmatch(vid):
+        raise BatchError("VIDEO_ID_INVALID")
+    assets = doc.get("assets")
+    if not isinstance(assets, dict) or set(assets) != ROLES:
+        raise BatchError("ASSET_ROLES_INVALID")
+    # Validate the same legacy registry before copying any media. Its files
+    # must also remain inside the private Runtime.
+    for relative in ("data/active_playlist.json", "research/index.json"):
+        safe_path(root, relative)
+    try:
+        ledger = read_source_ledger(root, expected=77)
+    except FileNotFoundError as exc:
+        raise BatchError("LEGACY_SOURCE_LEDGER_MISSING") from exc
+    except (ValueError, OSError, TypeError, KeyError) as exc:
+        raise BatchError("LEGACY_SOURCE_LEDGER_INVALID") from exc
+    if vid not in {x["video_id"] for x in ledger["videos"]}:
+        raise BatchError("VIDEO_NOT_REGISTERED")
+    # This explicit read-only source may be in an older Git checkout; no
+    # write or repository metadata access is performed there.
+    approved = Path(approved_media_root).absolute()
+    if ".." in approved.parts or any(_is_symlink_or_junction(p) for p in (approved, *approved.parents)):
+        raise BatchError("UNSAFE_APPROVED_MEDIA_ROOT")
+    approved = approved.resolve()
+    media_dir = approved / vid / "media"
+    if (not media_dir.is_dir() or not media_dir.resolve().is_relative_to(approved)
+            or any(_is_symlink_or_junction(p) for p in (media_dir, *media_dir.parents))):
+        raise BatchError("APPROVED_VIDEO_MEDIA_DIRECTORY_MISSING_OR_UNSAFE")
+    verified = {}
+    extensions = {"primary_video": {".mp4", ".webm", ".mkv"},
+                  "highres_video": {".mp4", ".webm", ".mkv"},
+                  "audio": {".m4a", ".aac", ".mp3", ".opus", ".webm", ".wav"},
+                  "subtitle_json3": {".json3"}}
+    for role in sorted(ROLES):
+        item = assets[role]
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise BatchError("ASSET_INVALID")
+        src = Path(item["path"])
+        if not src.is_absolute():
+            src = root / src
+        if ".." in src.parts or any(_is_symlink_or_junction(p) for p in (src, *src.parents)):
+            raise BatchError("IMPORT_UNSAFE_ASSET_PATH")
+        src = src.resolve()
+        # Exact original path only; never guess a filename or search.
+        if src.parent != media_dir or src.suffix.lower() not in extensions[role]:
+            raise BatchError("IMPORT_ASSET_OUTSIDE_APPROVED_VIDEO_MEDIA")
+        if not src.is_file():
+            raise BatchError("ASSET_UNAVAILABLE")
+        size, expected = item.get("size_bytes"), item.get("sha256")
+        if type(size) is not int or size <= 0 or src.stat().st_size != size:
+            raise BatchError("ASSET_SIZE_MISMATCH")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            raise BatchError("ASSET_HASH_INVALID")
+        expected = expected.lower()
+        if sha(src) != expected:
+            raise BatchError("ASSET_HASH_MISMATCH")
+        verified[role] = (src, size, expected)
+    prefix = Path("data") / "wp2-imports" / digest(raw)[:24]
+    imported = {}
+    for role, (src, size, expected) in verified.items():
+        rel = prefix / "assets" / (role + src.suffix.lower())
+        dest = safe_path(root, rel)
+        if not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Publish a verified temporary copy without overwriting or
+            # hardlinking the original. The temporary copy is on the target FS.
+            with tempfile.TemporaryDirectory(dir=dest.parent) as temp:
+                candidate = Path(temp) / "copy"
+                with src.open("rb") as a, candidate.open("xb") as b:
+                    shutil.copyfileobj(a, b, 1024 * 1024)
+                    b.flush()
+                    os.fsync(b.fileno())
+                if candidate.stat().st_size != size or sha(candidate) != expected:
+                    raise BatchError("IMPORT_COPY_HASH_MISMATCH")
+                try:
+                    os.link(candidate, dest)
+                except FileExistsError:
+                    pass
+        dest = safe_path(root, rel)
+        if not dest.is_file() or dest.stat().st_size != size or sha(dest) != expected:
+            raise BatchError("IMPORT_COPY_HASH_MISMATCH")
+        imported[role] = {"path": rel.as_posix(), "size_bytes": size, "sha256": expected}
+    # Preserve original manifest and source hashes. A separate minimal numeric
+    # legacy manifest carries only the contract fields used by the validator.
+    if read_bytes(original) != raw:
+        raise BatchError("SOURCE_MANIFEST_CHANGED_DURING_IMPORT")
+    relative = prefix / "manifest.json"
+    write_once(root, relative, json_bytes({"schema_version": 1, "status": "OFFLINE_INPUT_VERIFIED",
+                                           "video_id": vid, "assets": imported}))
+    ctx = lecture_source_context(root, relative)
+    if ctx.validated_assets != {role: {"size_bytes": size, "sha256": expected}
+                                 for role, (_, size, expected) in verified.items()}:
+        raise BatchError("IMPORTED_MANIFEST_ASSET_MISMATCH")
+    result = {"status": "PASS", "manifest": relative.as_posix(),
+              "original_manifest_sha256": digest(raw),
+              "verified_asset_count": len(imported),
+              "verified_copy_bytes": sum(v[1] for v in verified.values()),
+              "source_manifest_assets_verified": True, "model_requests": 0}
+    write_once(root, prefix / "import-receipt.json", json_bytes(result))
+    return result
+
+
 def prepare_lecture(root, source_root, manifest, start, seconds, models=None, trial="lecture-1"):
     """Read only an explicitly supplied prior private manifest and its validated assets."""
     if type(start) is not int or not 0 <= start <= 86400 or type(seconds) is not int or not 30 <= seconds <= 120:
@@ -1451,6 +1572,10 @@ def main(argv=None):
     source_check = sub.add_parser("lecture-source-check")
     source_check.add_argument("--source-root", required=True)
     source_check.add_argument("--manifest", required=True)
+    importer = sub.add_parser("lecture-import")
+    importer.add_argument("--source-root", required=True)
+    importer.add_argument("--manifest", required=True)
+    importer.add_argument("--approved-media-root", required=True)
     prep = sub.add_parser("prepare")
     prep.add_argument("--root", required=True)
     prep.add_argument("--media", required=True)
@@ -1496,6 +1621,8 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command == "lecture-import":
+            result = import_lecture_assets(args.source_root, args.manifest, args.approved_media_root)
         elif args.command == "lecture-source-check":
             result = lecture_source_check(args.source_root, args.manifest)
             print(json_bytes(result).decode("utf-8"), end="")
