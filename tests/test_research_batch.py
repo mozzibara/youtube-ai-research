@@ -942,6 +942,71 @@ class ResearchBatchTests(unittest.TestCase):
         with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_CONFLICT"):
             b.context_terminal_response(json.dumps(terminal).encode())
 
+    def test_context_repeated_identical_documents_and_strict_rejection(self):
+        response = {"transcript": "alpha", "uncertainties": [], "status": "COMPLETE"}
+        obj = json.dumps(response)
+        def raw(text, **extra):
+            return b.json_bytes({"event": "result", "result": {
+                "status": "SUCCESS", "response": text, **extra}})
+        self.assertEqual(b.context_terminal_details(raw((obj + "\n") * 4)), (response, 4))
+        self.assertEqual(b.context_terminal_details(raw(obj * 2, structured_output=response)), (response, 2))
+        with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_CONFLICT"):
+            b.context_terminal_response(raw(obj + json.dumps(dict(response, transcript="other"))))
+        with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_CONFLICT"):
+            b.context_terminal_response(raw(obj * 2, structured_output=dict(response, transcript="other")))
+        for bad in (obj + " trailing", obj + "{", obj + "[]",
+                    obj + '{"transcript":"alpha","transcript":"alpha","uncertainties":[],"status":"COMPLETE"}'):
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_INVALID"):
+                b.context_terminal_response(raw(bad))
+        with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_TOO_MANY_DOCUMENTS"):
+            b.context_terminal_response(raw(obj * 33))
+
+    def test_context_archive_recovery_hash_pinned_idempotent_and_pending_only(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "context_cli_preflight", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            long_plan = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(long_plan)
+            plan = b.prepare_context_plan(self.root, long_plan["length_plan"])
+            cid = plan["context_plan"]
+            folder = Path("context-plans") / cid / "CURRENT_ONLY"
+            prompt = b.read_bytes(b.safe_path(self.root, folder / "prompt.txt"))
+            claim = b.json_bytes({"mode": "CURRENT_ONLY", "prompt_sha256": b.digest(prompt),
+                                  "reservation": "POSSIBLE_SUBMISSION"})
+            b.write_once(self.root, folder / "claim.json", claim)
+            obj = {"transcript": "alpha alpha alpha alpha", "uncertainties": [], "status": "COMPLETE"}
+            response = b.json_bytes(obj)
+            stdout = b.json_bytes({"event": "result", "result": {
+                "status": "SUCCESS", "response": json.dumps(obj) * 4}}).strip()
+            # One physical NDJSON line, not pretty-printed outer JSON.
+            stdout = json.dumps(b.parse_json(stdout)).encode()
+            b.write_once(self.root, folder / "stdout.snapshot", stdout)
+            b.write_once(self.root, folder / "stderr.snapshot", b"")
+            args = (self.root, cid, "CURRENT_ONLY", b.digest(stdout), b.digest(b""), b.digest(response))
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_RECOVERY_OUTPUT_HASH_MISMATCH"):
+                b.recover_context_response(*args[:3], "0" * 64, *args[4:])
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_RECOVERY_RESPONSE_HASH_MISMATCH"):
+                b.recover_context_response(*args[:-1], "0" * 64)
+            self.assertFalse(b.safe_path(self.root, folder / "receipt.json").exists())
+            result = b.recover_context_response(*args)
+            self.assertEqual(result["status"], "RECOVERED")
+            self.assertEqual(result["model_requests"], 0)
+            self.assertEqual(result["terminal_document_count"], 4)
+            self.assertEqual(b.recover_context_response(*args)["status"], "ALREADY_CAPTURED")
+            report = b.context_report(self.root, cid)
+            self.assertEqual(report["pending_modes"], ["ADJACENT"])
+            row = report["variants"][0]
+            self.assertEqual(row["capture_source"], "HEADLESS_ARCHIVE_RECOVERY")
+            self.assertIsNone(row["elapsed_seconds"])
+            self.assertEqual(b.read_bytes(b.safe_path(self.root, folder / "claim.json")), claim)
+            self.assertEqual(b.read_bytes(b.safe_path(self.root, folder / "stdout.snapshot")), stdout)
+            b.safe_path(self.root, folder / "stderr.snapshot").write_bytes(b"tampered")
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_CAPTURE_MISMATCH"):
+                b.context_report(self.root, cid)
+
     def test_context_plan_isolates_inputs_and_blocks_unsettled_claim(self):
         original, prepare_clip = self.length_fixture()
         with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(

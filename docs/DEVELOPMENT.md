@@ -527,3 +527,21 @@ responses are private and immutable; a failed or interrupted reservation
 blocks further runs. No model response is accepted as observed speech:
 compare baseline, target and whole-span caption metrics and change
 from raw, without altering the original transcription.
+
+### Headless identical-document recovery
+
+The context-specific terminal parser accepts a bounded sequence of up
+to 32 complete schema-valid JSON objects only when every object is
+identical as a parsed value. Original slices are strictly validated
+for duplicate keys and nonfinite constants. Conflicting objects,
+trailing prose, incomplete documents, and disagreement with structured
+output fail closed. Terminal SUCCESS and the unique final result event
+remain required. No partial DONE text is treated as a final object.
+context-recover requires an existing context reservation and exact
+stdout, stderr and canonical response hashes. It revalidates the
+original plan and prompt, preserves original archives and claim,
+writes a separate response and receipt, and never calls AGY.
+Historical elapsed time, agent digest and exit code remain null;
+recovery provenance is HEADLESS_ARCHIVE_RECOVERY. New live receipts
+record HEADLESS_LIVE and the terminal document count. Subsequent
+context-run resumes only pending modes. No automatic resubmission.

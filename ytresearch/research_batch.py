@@ -2770,13 +2770,22 @@ def context_report(root, cid):
             receipt = parse_json(read_bytes(receipt_path))
             response = read_bytes(safe_path(root, folder / "response.json"))
             stdout = read_bytes(safe_path(root, folder / "stdout.snapshot"), MAX_LOG)
+            result, document_count = context_terminal_details(stdout)
             if (receipt.get("response_sha256") != digest(response)
                     or receipt.get("stdout_sha256") != digest(stdout)
-                    or context_terminal_response(stdout) != validate_response(response)):
+                    or result != validate_response(response)):
                 raise BatchError("CONTEXT_CAPTURE_MISMATCH")
-            result = validate_response(response)
+            if "terminal_document_count" in receipt and receipt["terminal_document_count"] != document_count:
+                raise BatchError("CONTEXT_CAPTURE_MISMATCH")
+            if "stderr_sha256" in receipt and receipt["stderr_sha256"] != digest(
+                    read_bytes(safe_path(root, folder / "stderr.snapshot"), MAX_LOG)):
+                raise BatchError("CONTEXT_CAPTURE_MISMATCH")
+            source = receipt.get("capture_source", "HEADLESS_LIVE_LEGACY")
+            if source not in ("HEADLESS_LIVE_LEGACY", "HEADLESS_LIVE", "HEADLESS_ARCHIVE_RECOVERY"):
+                raise BatchError("CONTEXT_CAPTURE_MISMATCH")
             text = result["transcript"]
-            row.update(status="CAPTURED", model_reported_status=result["status"],
+            row.update(status="CAPTURED", capture_source=source,
+                       terminal_document_count=document_count, model_reported_status=result["status"],
                        transcript_nonempty=bool(text.strip()), uncertainty_count=len(result["uncertainties"]),
                        elapsed_seconds=receipt["elapsed_seconds"],
                        change_from_raw=error_rate(normalized(texts[1]), normalized(text)),
@@ -2802,7 +2811,38 @@ def context_report(root, cid):
     return result
 
 
-def context_terminal_response(raw):
+def context_response_documents(text):
+    """Accept a single complete object or a bounded sequence of identical ones."""
+    if len(text.encode("utf-8")) > MAX_TEXT:
+        raise BatchError("CONTEXT_TERMINAL_RESPONSE_INVALID")
+    single = response_from_content(text)
+    if single is not None:
+        return [validate_response(single)]
+    decoder = json.JSONDecoder()
+    position, docs = 0, []
+    while position < len(text):
+        while position < len(text) and text[position] in " \t\r\n":
+            position += 1
+        if position == len(text):
+            break
+        if len(docs) >= 32:
+            raise BatchError("CONTEXT_TERMINAL_TOO_MANY_DOCUMENTS")
+        try:
+            _, end = decoder.raw_decode(text, position)
+            # Validate the original slice, including duplicate keys and constants.
+            value = validate_response(text[position:end].encode("utf-8"))
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            raise BatchError("CONTEXT_TERMINAL_RESPONSE_INVALID") from None
+        if docs and value != docs[0]:
+            raise BatchError("CONTEXT_TERMINAL_RESPONSE_CONFLICT")
+        docs.append(value)
+        position = end
+    if not docs:
+        raise BatchError("CONTEXT_TERMINAL_RESPONSE_INVALID")
+    return docs
+
+
+def context_terminal_details(raw):
     if not raw or len(raw) > MAX_LOG:
         raise BatchError("CONTEXT_OUTPUT_MISSING_OR_OVERSIZED")
     lines = [line for line in raw.splitlines() if line.strip()]
@@ -2819,19 +2859,86 @@ def context_terminal_response(raw):
         raise BatchError("CONTEXT_TERMINAL_NOT_SUCCESS")
     structured = terminal.get("structured_output")
     text = terminal.get("response")
-    parsed = []
+    parsed, count = [], 0
     if structured is not None:
         parsed.append(validate_response(json_bytes(structured)))
     if isinstance(text, str) and text.strip():
-        candidate = response_from_content(text)
-        if candidate is None:
-            raise BatchError("CONTEXT_TERMINAL_RESPONSE_INVALID")
-        parsed.append(validate_response(candidate))
+        documents = context_response_documents(text)
+        count = len(documents)
+        parsed.extend(documents)
     elif text is not None and not isinstance(text, str):
         raise BatchError("CONTEXT_TERMINAL_RESPONSE_INVALID")
     if not parsed or any(x != parsed[0] for x in parsed):
         raise BatchError("CONTEXT_TERMINAL_RESPONSE_CONFLICT_OR_EMPTY")
-    return parsed[0]
+    return parsed[0], count
+
+
+def context_terminal_response(raw):
+    return context_terminal_details(raw)[0]
+
+
+def recover_context_response(root, cid, mode, stdout_hash, stderr_hash, response_hash):
+    """Recover a previously reserved response; never invoke AGY."""
+    if mode not in CONTEXT_MODES or not re.fullmatch(r"context-[0-9a-f]{24}", cid):
+        raise BatchError("CONTEXT_RECOVERY_ID_INVALID")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", h) for h in
+           (stdout_hash, stderr_hash, response_hash)):
+        raise BatchError("CONTEXT_RECOVERY_HASH_INVALID")
+    root = safe_root(root)
+    lock = safe_path(root, Path("phase2-batches") / "live-controller.lock")
+    with lock.open("xb") as f:
+        f.write(b"CONTEXT_RECOVERY_CONTROLLER\n")
+    try:
+        base = Path("context-plans") / cid
+        folder = base / mode
+        saved = parse_json(read_bytes(safe_path(root, base / "plan.json")))
+        if not isinstance(saved, dict) or context_id(saved) != cid:
+            raise BatchError("CONTEXT_PLAN_INVALID")
+        root, plan, prompts, _, _, _ = context_inputs(root, saved["prior_length_plan"])
+        if saved != plan:
+            raise BatchError("CONTEXT_INPUT_CHANGED")
+        prompt = read_bytes(safe_path(root, folder / "prompt.txt"))
+        if prompt != prompts[CONTEXT_MODES.index(mode)]:
+            raise BatchError("CONTEXT_PROMPT_CHANGED")
+        expected = {"mode": mode, "prompt_sha256": digest(prompt),
+                    "reservation": "POSSIBLE_SUBMISSION"}
+        if parse_json(read_bytes(safe_path(root, folder / "claim.json"))) != expected:
+            raise BatchError("CONTEXT_CLAIM_MISMATCH")
+        stdout = read_bytes(safe_path(root, folder / "stdout.snapshot"), MAX_LOG)
+        stderr = read_bytes(safe_path(root, folder / "stderr.snapshot"), MAX_LOG)
+        if digest(stdout) != stdout_hash or digest(stderr) != stderr_hash:
+            raise BatchError("CONTEXT_RECOVERY_OUTPUT_HASH_MISMATCH")
+        obj, count = context_terminal_details(stdout)
+        response = json_bytes(obj)
+        if digest(response) != response_hash:
+            raise BatchError("CONTEXT_RECOVERY_RESPONSE_HASH_MISMATCH")
+        receipt_path = safe_path(root, folder / "receipt.json")
+        response_path = safe_path(root, folder / "response.json")
+        if receipt_path.exists():
+            receipt = parse_json(read_bytes(receipt_path))
+            if (not response_path.exists() or read_bytes(response_path) != response
+                    or receipt.get("response_sha256") != response_hash
+                    or receipt.get("stdout_sha256") != stdout_hash):
+                raise BatchError("CONTEXT_CAPTURE_MISMATCH")
+            return {"status": "ALREADY_CAPTURED", "mode": mode,
+                    "response_sha256": response_hash, "terminal_document_count": count,
+                    "model_requests": 0}
+        if response_path.exists() and read_bytes(response_path) != response:
+            raise BatchError("CONTEXT_CAPTURE_MISMATCH")
+        # Historical stdout/stderr were persisted but exit code and timing were
+        # not. Terminal SUCCESS is verified; do not reconstruct missing metadata.
+        write_once(root, folder / "response.json", response)
+        write_once(root, folder / "receipt.json", json_bytes({
+            "response_sha256": response_hash, "stdout_sha256": stdout_hash,
+            "stderr_sha256": stderr_hash, "terminal_document_count": count,
+            "capture_source": "HEADLESS_ARCHIVE_RECOVERY",
+            "elapsed_seconds": None, "agent_sha256": None, "cli_exit_code": None,
+            "os_isolation_verified": False, "audio_verified": False}))
+        return {"status": "RECOVERED", "mode": mode,
+                "response_sha256": response_hash, "terminal_document_count": count,
+                "model_requests": 0}
+    finally:
+        lock.unlink()
 
 
 def context_cli_preflight():
@@ -2926,10 +3033,13 @@ def run_context_plan(root, cid, max_new_calls, *, authorized):
                 write_once(root, folder / "stderr.snapshot", stderr)
                 if exit_code:
                     raise BatchError("CONTEXT_CLI_EXIT_NO_RETRY")
-                response = json_bytes(context_terminal_response(stdout))
+                parsed, document_count = context_terminal_details(stdout)
+                response = json_bytes(parsed)
                 write_once(root, folder / "response.json", response)
                 write_once(root, folder / "receipt.json", json_bytes({
                     "response_sha256": digest(response), "stdout_sha256": digest(stdout),
+                    "stderr_sha256": digest(stderr), "terminal_document_count": document_count,
+                    "capture_source": "HEADLESS_LIVE", "cli_exit_code": exit_code,
                     "agent_sha256": digest(agent_raw), "elapsed_seconds": time.monotonic() - start,
                     "os_isolation_verified": False, "audio_verified": False}))
             context_report(root, cid)
@@ -2972,6 +3082,13 @@ def main(argv=None):
     cr = sub.add_parser("context-report")
     cr.add_argument("--root", required=True)
     cr.add_argument("--context-plan", required=True)
+    crec = sub.add_parser("context-recover")
+    crec.add_argument("--root", required=True)
+    crec.add_argument("--context-plan", required=True)
+    crec.add_argument("--mode", choices=CONTEXT_MODES, required=True)
+    crec.add_argument("--stdout-sha256", required=True)
+    crec.add_argument("--stderr-sha256", required=True)
+    crec.add_argument("--response-sha256", required=True)
     cx = sub.add_parser("context-run")
     cx.add_argument("--root", required=True)
     cx.add_argument("--context-plan", required=True)
@@ -3079,6 +3196,10 @@ def main(argv=None):
             result = prepare_context_plan(args.root, args.prior_length_plan)
         elif args.command == "context-report":
             result = context_report(args.root, args.context_plan)
+        elif args.command == "context-recover":
+            result = recover_context_response(args.root, args.context_plan, args.mode,
+                                              args.stdout_sha256, args.stderr_sha256,
+                                              args.response_sha256)
         elif args.command == "context-run":
             result = run_context_plan(args.root, args.context_plan, args.max_new_calls,
                                       authorized=args.authorize_headless)
