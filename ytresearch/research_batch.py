@@ -3053,10 +3053,261 @@ def run_context_plan(root, cid, max_new_calls, *, authorized):
         lock.unlink()
 
 
+
+def retry_quality(response):
+    """Reference-free signals, not evidence of actual acoustic accuracy."""
+    text = response["transcript"]
+    signals = []
+    if response["status"] == "UNAVAILABLE":
+        signals.append("UNAVAILABLE_SELF_REPORT")
+    if not text.strip():
+        signals.append("EMPTY_TRANSCRIPT")
+    if response["status"] == "PARTIAL":
+        signals.append("PARTIAL_SELF_REPORT")
+    if "[불명확]" in text:
+        signals.append("EXPLICIT_UNCLEAR_MARKER")
+    if response["uncertainties"]:
+        signals.append("MODEL_UNCERTAINTY")
+    return signals
+
+
+def retry_anchor_span(original, texts, first, last, *, anchor_words=4):
+    """Unique exact adjacent-word anchors, NOT verified temporal alignment."""
+    tokens = list(re.finditer(r"\S+", original))
+    words = [m.group() for m in tokens]
+    def locate(anchor):
+        if len(anchor) != anchor_words:
+            return None
+        hits = [i for i in range(len(words) - anchor_words + 1)
+                if words[i:i + anchor_words] == anchor]
+        return hits[0] if len(hits) == 1 else None
+    left, right = 0, len(original)
+    if first:
+        match = locate(texts[first - 1].split()[-anchor_words:])
+        if match is None:
+            return None
+        left = tokens[match + anchor_words - 1].end()
+    if last < len(texts):
+        match = locate(texts[last].split()[:anchor_words])
+        if match is None:
+            return None
+        right = tokens[match].start()
+    if left >= right:
+        return None
+    return left, right
+
+
+def retry_candidates(original, tilings):
+    """Simulate one contiguous replacement, preserving the source transcript."""
+    candidates = []
+    for label, clips in tilings:
+        texts = [c["response"]["transcript"] for c in clips]
+        for first in range(len(clips)):
+            for last in range(first + 1, len(clips) + 1):
+                selected = clips[first:last]
+                # A candidate with reported defects cannot be considered clean.
+                if any(retry_quality(c["response"]) for c in selected):
+                    continue
+                full = first == 0 and last == len(clips)
+                if full:
+                    span = (0, len(original))
+                else:
+                    neighbors = ([clips[first - 1]] if first else []) + (
+                        [clips[last]] if last < len(clips) else [])
+                    if any(retry_quality(c["response"]) for c in neighbors):
+                        continue
+                    span = retry_anchor_span(original, texts, first, last)
+                    if span is None:
+                        continue
+                left, right = span
+                replacement = " ".join(texts[first:last])
+                if full:
+                    combined = replacement
+                else:
+                    combined = (original[:left] + (" " if left else "") +
+                                replacement + (" " if right < len(original) else "") +
+                                original[right:])
+                if combined == original:
+                    continue
+                removed = original[left:right]
+                # Marker presence is a textual localization signal only.
+                marker = "[불명확]" in removed
+                candidates.append({
+                    "id": f"{label}:{first}:{last}", "full": full,
+                    "start_seconds": selected[0]["start_seconds"],
+                    "duration_seconds": sum(c["duration_seconds"] for c in selected),
+                    "counterfactual_cli_requests": len(selected),
+                    "counterfactual_elapsed_seconds": (
+                        sum(c["elapsed_seconds"] for c in selected)
+                        if all(type(c["elapsed_seconds"]) in (int, float) for c in selected) else None),
+                    "source_batches": [c["batch_id"] for c in selected],
+                    "source_response_sha256": [c["response_sha256"] for c in selected],
+                    "boundary": "WHOLE_CLIP" if full else "UNIQUE_EXACT_ADJACENT_WORD_ANCHORS",
+                    "original_char_range": [left, right],
+                    "removed_chars": len(removed), "replacement_chars": len(replacement),
+                    "contains_explicit_marker": marker,
+                    "text": combined,
+                })
+    return candidates
+
+
+def retry_blind_choice(response, candidates):
+    """No reference argument. Only missing whole transcript can be replaced
+    without a manual boundary review; partial candidates remain simulations."""
+    if not response["transcript"].strip():
+        options = [c for c in candidates if c["full"]]
+        if options:
+            return min(options, key=lambda c: (c["counterfactual_cli_requests"], c["id"]))
+    # For nonempty text, retain baseline. Surface marker-localized candidates
+    # for review; neither self-report nor anchors prove a safe replacement.
+    return None
+
+
+def retry_clip(root, item):
+    window, row, transcript, base, batch = item
+    if transcript is None or row["status"] != "CAPTURED":
+        raise BatchError("RETRY_EXISTING_CAPTURE_REQUIRED")
+    job = next(j for j in batch["jobs"] if j["model"] == LENGTH_MODEL)
+    folder = base / job["id"]
+    raw = read_bytes(safe_path(root, folder / "response.txt"))
+    receipt = parse_json(read_bytes(safe_path(root, folder / "receipt.json")))
+    response = validate_response(raw)
+    if (digest(raw) != receipt.get("response_sha256") or
+            response["transcript"] != transcript):
+        raise BatchError("RETRY_CAPTURE_CHANGED")
+    return dict(window, response=response, response_sha256=digest(raw),
+                elapsed_seconds=row.get("elapsed_seconds"))
+
+
+def retry_report(root, lid):
+    """WP3-D offline study. No model calls or new media; no source overwrite."""
+    root, plan, groups = length_state(root, lid)
+    if plan["schema"] != LONG_LENGTH_SCHEMA:
+        raise BatchError("RETRY_LONG_PLAN_REQUIRED")
+    original_clip = retry_clip(root, groups[-1][1][0])
+    base, batch = groups[-1][1][0][3:5]
+    original = original_clip["response"]
+    short = [retry_clip(root, item) for item in groups[0][1]]
+    _, prior, earlier = length_state(root, plan["prior_length_plan"])
+    tilings = [("120", short)]
+    for length, items in earlier:
+        if length in (30, 60):
+            tilings.append((str(length), [retry_clip(root, item) for item in items] + short[1:]))
+    # Freeze blind decision before scoring against the reference.
+    candidates = retry_candidates(original["transcript"], tilings)
+    blind = retry_blind_choice(original, candidates)
+    raw = read_bytes(safe_path(root, base / "evaluation-only" / "reference.txt"))
+    if digest(raw) != batch["reference_sha256"]:
+        raise BatchError("RETRY_REFERENCE_HASH_MISMATCH")
+    reference = raw.decode("utf-8-sig")
+    baseline = metrics(reference, original["transcript"])
+    rows = []
+    for c in candidates:
+        text = c["text"]
+        row = {k: v for k, v in c.items() if k != "text"}
+        row.update(transcript_sha256=digest(text.encode("utf-8")),
+                   change_from_original=error_rate(normalized(original["transcript"]), normalized(text)),
+                   metrics=metrics(reference, text),
+                   review_required=not c["full"] or bool(original["transcript"].strip()),
+                   provenance="SIMULATED_EXISTING_MEDIA_CAPTURE_REPLACEMENT")
+        rows.append(row)
+    def rank(row):
+        m = row["metrics"]
+        return (m["normalized_cer"]["edits"], m["raw_cer"]["edits"], m["raw_wer"]["edits"],
+                row["counterfactual_cli_requests"], row["id"])
+    # Missing distance (bounded edit calculation) must not win an oracle.
+    valid = [r for r in rows if all(r["metrics"][key]["edits"] is not None
+                                  for key in ("normalized_cer", "raw_cer", "raw_wer"))]
+    baseline_valid = all(baseline[k]["edits"] is not None
+                         for k in ("normalized_cer", "raw_cer", "raw_wer"))
+    best = min(valid, key=rank) if valid and baseline_valid else None
+    baseline_rank = tuple(baseline[k]["edits"] for k in ("normalized_cer", "raw_cer", "raw_wer"))
+    if best and rank(best)[:3] >= baseline_rank:
+        best = None
+    blind_row = next((r for r in rows if blind and r["id"] == blind["id"]), None)
+    result = {
+        "schema": "wp3d_retry_offline_v1", "length_plan": lid,
+        "reference_scope": "CAPTION_PROXY_NOT_HUMAN_TRUTH",
+        "common_reference_sha256": digest(raw), "model_requests": 0,
+        "new_media_seconds": 0, "source_mutations": 0,
+        "original_response_sha256": original_clip["response_sha256"],
+        "original_signals": retry_quality(original),
+        "signal_scope": "WHOLE_CLIP_UNLESS_EXPLICIT_TEXT_MARKER_NOT_TIMESTAMP",
+        "original_metrics": baseline,
+        "tilings": [{"label": label, "clips": [{"batch_id": c["batch_id"],
+                     "start_seconds": c["start_seconds"], "duration_seconds": c["duration_seconds"],
+                     "signals": retry_quality(c["response"]), "response_sha256": c["response_sha256"]}
+                     for c in clips]} for label, clips in tilings],
+        "blind": {"selection": blind_row["id"] if blind_row else "KEEP_ORIGINAL",
+                  "metrics": blind_row["metrics"] if blind_row else baseline,
+                  "review_candidates": [r["id"] for r in rows
+                                        if not r["full"] and r["contains_explicit_marker"]]},
+        "oracle": {"selection": best["id"] if best else "KEEP_ORIGINAL",
+                   "metrics": best["metrics"] if best else baseline,
+                   "scope": "REFERENCE_SELECTED_EXPLORATORY_NOT_OPERATIONAL",
+                   "ranking": "NORMALIZED_CER_RAW_CER_RAW_WER_THEN_CALLS"},
+        "candidates": rows, "partial_boundaries_acoustically_verified": False,
+        "automatic_partial_replacement": False,
+    }
+    encoded = json_bytes(result)
+    write_once(root, Path("length-plans") / "retry-reports" / lid /
+               (digest(encoded)[:24] + ".json"), encoded)
+    return result
+
+
+def context_change_report(root, cid):
+    """Summarize existing verified text edits without exposing any text."""
+    from difflib import SequenceMatcher
+    summary = context_report(root, cid)
+    if summary["status"] != "COMPLETE":
+        raise BatchError("CONTEXT_CHANGE_REQUIRES_COMPLETE")
+    root = safe_root(root)
+    base = Path("context-plans") / cid
+    plan = parse_json(read_bytes(safe_path(root, base / "plan.json")))
+    _, rebuilt, _, texts, _, _ = context_inputs(root, plan["prior_length_plan"])
+    if rebuilt != plan:
+        raise BatchError("CONTEXT_INPUT_CHANGED")
+    original = texts[1]
+    rows = []
+    for mode in CONTEXT_MODES:
+        folder = base / mode
+        raw = read_bytes(safe_path(root, folder / "response.json"))
+        receipt = parse_json(read_bytes(safe_path(root, folder / "receipt.json")))
+        if digest(raw) != receipt.get("response_sha256"):
+            raise BatchError("CONTEXT_CAPTURE_MISMATCH")
+        updated = validate_response(raw)["transcript"]
+        def changes(a, b):
+            if len(a) * len(b) > MAX_EDIT_CELLS:
+                return None
+            counts = {k: 0 for k in ("insert", "delete", "replace")}
+            removed = added = 0
+            for tag, i, j, m, n in SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+                if tag != "equal":
+                    counts[tag] += 1
+                    removed += j - i
+                    added += n - m
+            return {"operation_blocks": counts, "removed_chars": removed, "added_chars": added}
+        rows.append({"mode": mode, "response_sha256": digest(raw),
+                     "raw_changes": changes(original, updated),
+                     "normalized_changes": changes(normalized(original), normalized(updated)),
+                     "provenance": "TEXT_INFERENCE_ONLY_NOT_OBSERVED_SPEECH"})
+    result = {"context_plan": cid, "model_requests": 0, "variants": rows,
+              "semantic_accuracy_verified": False}
+    encoded = json_bytes(result)
+    write_once(root, base / "change-reports" / (digest(encoded)[:24] + ".json"), encoded)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("probe")
+    rr = sub.add_parser("retry-report")
+    rr.add_argument("--root", required=True)
+    rr.add_argument("--length-plan", required=True)
+    cc = sub.add_parser("context-change-report")
+    cc.add_argument("--root", required=True)
+    cc.add_argument("--context-plan", required=True)
     lp = sub.add_parser("length-plan")
     lp.add_argument("--root", required=True)
     lp.add_argument("--source-root", required=True)
@@ -3182,6 +3433,10 @@ def main(argv=None):
         args = parser.parse_args(argv)
         if args.command == "probe":
             result = capability_probe()
+        elif args.command == "retry-report":
+            result = retry_report(args.root, args.length_plan)
+        elif args.command == "context-change-report":
+            result = context_change_report(args.root, args.context_plan)
         elif args.command == "length-plan":
             result = prepare_length_plan(args.root, args.source_root, args.manifest,
                                          args.start_seconds, args.reuse_batch)
