@@ -3201,13 +3201,18 @@ def retry_report(root, lid):
         raise BatchError("RETRY_REFERENCE_HASH_MISMATCH")
     reference = raw.decode("utf-8-sig")
     baseline = metrics(reference, original["transcript"])
+    score_cache = {original["transcript"]: baseline}
+    def score(text):
+        if text not in score_cache:
+            score_cache[text] = metrics(reference, text)
+        return score_cache[text]
     rows = []
     for c in candidates:
         text = c["text"]
         row = {k: v for k, v in c.items() if k != "text"}
         row.update(transcript_sha256=digest(text.encode("utf-8")),
                    change_from_original=error_rate(normalized(original["transcript"]), normalized(text)),
-                   metrics=metrics(reference, text),
+                   metrics=score(text),
                    review_required=not c["full"] or bool(original["transcript"].strip()),
                    provenance="SIMULATED_EXISTING_MEDIA_CAPTURE_REPLACEMENT")
         rows.append(row)
@@ -3234,10 +3239,17 @@ def retry_report(root, lid):
         "original_signals": retry_quality(original),
         "signal_scope": "WHOLE_CLIP_UNLESS_EXPLICIT_TEXT_MARKER_NOT_TIMESTAMP",
         "original_metrics": baseline,
-        "tilings": [{"label": label, "clips": [{"batch_id": c["batch_id"],
+        "original_normalized_chars_per_second": len(normalized(original["transcript"])) / plan["span_seconds"],
+        "tilings": [{"label": label,
+                     "all_clip_metrics": score(" ".join(c["response"]["transcript"] for c in clips)),
+                     "clips": [{"batch_id": c["batch_id"],
                      "start_seconds": c["start_seconds"], "duration_seconds": c["duration_seconds"],
+                     "normalized_chars_per_second": len(normalized(c["response"]["transcript"])) / c["duration_seconds"],
                      "signals": retry_quality(c["response"]), "response_sha256": c["response_sha256"]}
                      for c in clips]} for label, clips in tilings],
+        "density_policy": "DESCRIPTIVE_ONLY_NO_SILENCE_OR_FAILURE_INFERENCE",
+        "oracle_candidate_filter": "NO_EXPLICIT_QUALITY_SIGNALS_IN_REPLACEMENT_OR_REQUIRED_ANCHORS",
+        "nonlocalized_signal_review_scope": "WHOLE_CLIP_NO_INFERRED_TIMESTAMPS",
         "blind": {"selection": blind_row["id"] if blind_row else "KEEP_ORIGINAL",
                   "metrics": blind_row["metrics"] if blind_row else baseline,
                   "review_candidates": [r["id"] for r in rows
