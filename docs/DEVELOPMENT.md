@@ -470,3 +470,22 @@ timeout. The existing two-valid-agreeing automatic capture rule is
 unchanged; an explicit operator-response recovery is still needed.
 No provider terminal-event or ingress assertion, automatic retry,
 or new model call is introduced.
+
+### Explicit research full-primary fallback
+
+The existing long response audit found a complete valid full alias and
+a shorter malformed short alias, not simple end truncation. The research
+CLI lecture-batch/live-batch has an explicit --allow-full-primary opt-in.
+Default capture remains two agreeing valid aliases. After the existing
+30-second stable review condition, full-primary requires exactly two
+rows in each record, the same user content and media envelope, no tools,
+DONE model rows, a valid full final response, and a shorter malformed
+JSON short final body with object delimiters and at least 128 common
+prefix characters but not a pure prefix. These are conservative pilot
+criteria, not proof of equivalent responses or the vendor's shortening
+algorithm. Both unmodified traces are retained and checked on reuse.
+The capture is distinctly SESSION_FULL_PRIMARY, with independent alias
+agreement false. Valid conflicts, unknown layouts and other failed
+conditions remain review-only. No new submission or retry is introduced.
+Prior reconstructed captures are not reclassified. The offline trace
+audit now reports policy eligibility without changing capture state.

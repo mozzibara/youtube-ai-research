@@ -964,6 +964,75 @@ class ResearchBatchTests(unittest.TestCase):
         review.assert_called_once_with(session, hashes)
         self.assertEqual(b.report(root, bid)["jobs"][0]["status"], "BLOCKED_UNSETTLED_CLAIM")
 
+    def full_primary_fixture(self):
+        full_content = json.dumps({"transcript": "alpha " * 100,
+                                   "uncertainties": [], "status": "COMPLETE"})
+        short_content = full_content[:250] + "\n" + full_content[450:]
+        user = {"type": "USER_INPUT", "source": "USER_EXPLICIT", "status": "DONE",
+                "content": b.PROMPT, "media": [{}]}
+        final = {"type": "PLANNER_RESPONSE", "source": "MODEL", "status": "DONE"}
+        def encode(content, input_row=None, final_row=None):
+            return b"\n".join(json.dumps(row).encode() for row in (
+                user if input_row is None else input_row,
+                dict(final if final_row is None else final_row, content=content)))
+        return encode(full_content), encode(short_content), encode, user, final
+
+    def test_full_primary_requires_same_envelope_and_invalid_short(self):
+        full, short, encode, user, final = self.full_primary_fixture()
+        candidate = b.full_primary_candidate(full, short)
+        self.assertIsNotNone(candidate)
+        self.assertEqual(b.validate_response(candidate)["transcript"], "alpha " * 100)
+        conflict = json.dumps({"transcript": "other", "uncertainties": [], "status": "COMPLETE"})
+        self.assertIsNone(b.full_primary_candidate(full, encode(conflict)))
+        short_body, _ = b.final_content_shape(short)
+        self.assertIsNone(b.full_primary_candidate(full, encode(short_body, dict(user, media=[{"other": True}]))))
+        self.assertIsNone(b.full_primary_candidate(full, encode(short_body, final_row=dict(final, tool_calls=[{}]))))
+        self.assertIsNone(b.full_primary_candidate(full, encode(short_body, final_row=dict(final, status="RUNNING"))))
+        self.assertIsNone(b.full_primary_candidate(full, encode(short_body[:200])))
+        self.assertIsNone(b.full_primary_candidate(short, full))
+
+    def test_full_primary_wait_opt_in_preserves_both_records(self):
+        bid, root, base, job, brain, session, hashes = self.trace_audit_fixture()
+        full, short, _, _, _ = self.full_primary_fixture()
+        for name, raw in (("transcript_full.jsonl", full), ("transcript.jsonl", short)):
+            (session / name).write_bytes(raw)
+        clock = [0]
+        def sleep(seconds):
+            clock[0] += seconds
+        with patch.object(b, "session_from_baseline", return_value=session), patch.object(
+                b.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
+                b.time, "sleep", side_effect=sleep):
+            pair = b.wait_live_pair((brain, set()), timeout=10, review_settle=3,
+                                    review=lambda path, expected: b.audit_trace_pair(
+                                        root, base / job["id"], path, expected),
+                                    allow_full_primary=True)
+        self.assertEqual(pair, (full, b.full_primary_candidate(full, short), short))
+        self.assertEqual(b.report(root, bid)["jobs"][0]["status"], "BLOCKED_UNSETTLED_CLAIM")
+
+    def test_full_primary_capture_reuse_checks_malformed_alias(self):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        full, short, _, _, _ = self.full_primary_fixture()
+        candidate = b.full_primary_candidate(full, short)
+        b.claim(root, base, job)
+        b.write_once(root, folder / "live-session.snapshot", full)
+        b.write_once(root, folder / "live-session-alias.snapshot", short)
+        b.write_once(root, folder / "live-pilot.json", b.json_bytes({
+            "capture_source": b.FULL_PRIMARY_SOURCE,
+            "completion_evidence": "FULL_PRIMARY_MALFORMED_ALIAS_STABLE_30S",
+            "full_primary_authorized": True, "independent_alias_agreement": False,
+            "session_sha256": b.digest(full), "alias_sha256": b.digest(short),
+            "window_close_status": "CLOSED"}))
+        b.capture(root, base, job, candidate, 35, source=b.FULL_PRIMARY_SOURCE)
+        row = b.report(root, bid)["jobs"][0]
+        self.assertEqual(row["capture_source"], b.FULL_PRIMARY_SOURCE)
+        self.assertFalse(b.completed_live_job(root, base, job, row)["independent_alias_agreement"])
+        b.safe_path(root, folder / "live-session-alias.snapshot").write_bytes(b"tampered")
+        with self.assertRaisesRegex(b.BatchError, "FULL_PRIMARY_EVIDENCE_MISMATCH"):
+            b.completed_live_job(root, base, job, row)
+
     def test_stage_prompt_retains_clipboard_and_pastes_once(self):
         from unittest.mock import Mock
         pg, clip, target = Mock(), Mock(), Mock()

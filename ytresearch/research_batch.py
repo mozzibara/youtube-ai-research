@@ -333,7 +333,7 @@ def capability_probe():
 def capture(root, base, job, raw, elapsed, *, source="DIRECT_TUI_CLIPBOARD"):
     """Preserve captured bytes before parsing. Never replace a previous capture."""
     if source not in ("DIRECT_TUI_CLIPBOARD", "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY",
-                      "OPERATOR_TUI_RECONSTRUCTION"):
+                      "OPERATOR_TUI_RECONSTRUCTION", FULL_PRIMARY_SOURCE):
         raise BatchError("INVALID_CAPTURE_SOURCE")
     folder = base / job["id"]
     claim_path = safe_path(root, folder / "claim.json")
@@ -1248,6 +1248,73 @@ def final_content_shape(raw):
     return content, result
 
 
+FULL_PRIMARY_SOURCE = "SESSION_FULL_PRIMARY"
+FULL_PRIMARY_POLICY = "FULL_VALID_SHORT_MALFORMED_SAME_SINGLE_TURN_V1"
+
+
+def full_primary_candidate(full, short):
+    """Conservative research fallback, not two-source response agreement.
+
+    The short alias must have the same single user/media envelope and a
+    DONE model row, but a shorter malformed JSON body. A substantial
+    common prefix is required. No repair of the malformed alias.
+    """
+    try:
+        candidate = session_log_candidate(full, live=True)
+        if candidate is None or session_log_candidate(short, live=True) is not None:
+            return None
+        frows = [parse_json(line) for line in full.splitlines() if line.strip()]
+        srows = [parse_json(line) for line in short.splitlines() if line.strip()]
+        if len(frows) != 2 or len(srows) != 2:
+            return None
+        fu, su = frows[0], srows[0]
+        if not isinstance(su, dict) or not isinstance(srows[1], dict):
+            return None
+        if (fu.get("content") != su.get("content") or fu.get("media") != su.get("media")
+                or any(row.get("tool_calls") for row in srows)):
+            return None
+        # Validate the short envelope with the full final body substituted
+        # in memory ONLY. Preserve the original short bytes unchanged.
+        repaired = [su, dict(srows[1], content=frows[1]["content"])]
+        if session_log_candidate(
+                b"\n".join(json.dumps(row, ensure_ascii=True).encode("ascii")
+                           for row in repaired), live=True) is None:
+            return None
+        fbody, fshape = final_content_shape(full)
+        sbody, sshape = final_content_shape(short)
+        if (fbody is None or sbody is None or fshape["response_validation"] != "VALID"
+                or sshape.get("response_validation") != "INVALID_JSON"
+                or not sshape.get("body_starts_object") or not sshape.get("body_ends_object")
+                or len(sbody) >= len(fbody)):
+            return None
+        prefix = 0
+        for a, b in zip(fbody, sbody):
+            if a != b:
+                break
+            prefix += 1
+        if prefix < 128 or prefix == len(sbody):
+            return None
+        return candidate
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        return None
+
+
+def full_primary_pair(session, expected):
+    paths = scoped_session_candidates(session)
+    names = {"transcript_full.jsonl", "transcript.jsonl"}
+    if len(paths) != 2 or {p.name for p in paths} != names or set(expected) != names:
+        return None
+    records = {}
+    for path in paths:
+        raw = read_bytes(path, MAX_LOG)
+        if digest(raw) != expected[path.name]:
+            raise BatchError("FULL_PRIMARY_TRACE_CHANGED")
+        records[path.name] = raw
+    full, short = records["transcript_full.jsonl"], records["transcript.jsonl"]
+    candidate = full_primary_candidate(full, short)
+    return (full, candidate, short) if candidate is not None else None
+
+
 def audit_trace_pair(root, folder, session, expected_hashes, *, captured_response=None):
     """Hash-pinned inspection of just two known files in one correlated session.
 
@@ -1290,7 +1357,10 @@ def audit_trace_pair(root, folder, session, expected_hashes, *, captured_respons
     result = {"status": "DIAGNOSTIC_ONLY", "trace_diagnostic": info,
               "final_content_relation": relation, "model_requests": 0,
               "provider_ingress_verified": False, "automatic_capture": False,
-              "source_snapshots_preserved": True}
+              "source_snapshots_preserved": True,
+              "full_primary_policy": FULL_PRIMARY_POLICY,
+              "full_primary_eligible": full_primary_candidate(
+                  records["transcript_full.jsonl"], records["transcript.jsonl"]) is not None}
     candidates = [c for raw in records.values()
                   if (c := session_log_candidate(raw, live=True)) is not None]
     if pair is None and len(candidates) == 1:
@@ -1388,7 +1458,8 @@ def audit_job_traces(root, bid, job_id, *, operator_closed, full_hash, short_has
         global_lock.unlink()
 
 
-def wait_live_pair(before, *, timeout=180, settle=5, review=None, review_settle=30):
+def wait_live_pair(before, *, timeout=180, settle=5, review=None, review_settle=30,
+                   allow_full_primary=False):
     """Bounded polling of both final responses, with safe progress reporting."""
     started = time.monotonic()
     deadline = started + timeout
@@ -1421,6 +1492,12 @@ def wait_live_pair(before, *, timeout=180, settle=5, review=None, review_settle=
                 elif now - review_since >= review_settle:
                     diagnostic = review(session, expected)
                     print("LIVE_TRACE_REVIEW=" + json.dumps(diagnostic, ensure_ascii=True), flush=True)
+                    if (allow_full_primary and diagnostic.get("status") == "OPERATOR_REVIEW_REQUIRED"
+                            and diagnostic.get("full_primary_eligible") is True):
+                        primary = full_primary_pair(session, expected)
+                        if primary is not None:
+                            print("LIVE_FULL_PRIMARY_DEGRADED_EVIDENCE", flush=True)
+                            return primary
                     raise BatchError("LIVE_SINGLE_TRACE_REVIEW_REQUIRED_NO_RETRY")
             else:
                 review_key = review_since = None
@@ -1863,7 +1940,8 @@ def authorize_clipboard_recovery(root, base, plan, job, pg, *, reason="FILE_DROP
     write_once(root, folder / "clipboard-recovery.json", json_bytes(receipt))
 
 
-def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False, recovery_reason="FILE_DROP_FAILED"):
+def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False,
+             recovery_reason="FILE_DROP_FAILED", allow_full_primary=False):
     folder = base / job["id"]
     workspace(root, base, job, plan)
     if recover_clipboard:
@@ -1878,17 +1956,25 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False, r
     started = time.monotonic()
     trace, raw, alias = wait_live_pair(
         before, timeout=600,
-        review=lambda session, expected: audit_trace_pair(root, folder, session, expected))
+        review=lambda session, expected: audit_trace_pair(root, folder, session, expected),
+        allow_full_primary=allow_full_primary)
+    primary = session_log_candidate(alias, live=True) is None
+    if primary and (not allow_full_primary or full_primary_candidate(trace, alias) != raw):
+        raise BatchError("FULL_PRIMARY_POLICY_REQUIRED")
+    source = FULL_PRIMARY_SOURCE if primary else "SESSION_TRACE_PILOT"
     write_once(root, folder / "live-session.snapshot", trace)
     write_once(root, folder / "live-session-alias.snapshot", alias)
     status = capture(root, base, job, raw, time.monotonic() - started,
-                     source="SESSION_TRACE_PILOT")
+                     source=source)
     if status != "CAPTURED":
         raise BatchError("LIVE_CAPTURE_INVALID_NO_RETRY")
     close_status = close_pilot_window(pg, hwnd, title)
-    evidence = {"capture_source": "SESSION_TRACE_PILOT",
+    evidence = {"capture_source": source,
                 "automatic_session_extraction_observed": True,
-                "completion_evidence": "TWO_AGREEING_DONE_TRACES_STABLE_5S",
+                "completion_evidence": ("FULL_PRIMARY_MALFORMED_ALIAS_STABLE_30S" if primary
+                                        else "TWO_AGREEING_DONE_TRACES_STABLE_5S"),
+                "full_primary_authorized": bool(primary),
+                "independent_alias_agreement": not primary,
                     "alias_sha256": digest(alias),
                 "provider_terminal_event_verified": False,
                 "provider_ingress_verified": False,
@@ -1902,7 +1988,8 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False, r
 def completed_live_job(root, base, job, row, *, confirm_closed=False):
     """Validate saved capture before reuse; never resubmit a claimed job."""
     if row["status"] != "CAPTURED" or row.get("capture_source") not in (
-            "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY", "OPERATOR_TUI_RECONSTRUCTION"):
+            "SESSION_TRACE_PILOT", "SESSION_TRACE_RECOVERY", "OPERATOR_TUI_RECONSTRUCTION",
+            FULL_PRIMARY_SOURCE):
         raise BatchError("UNSETTLED_OR_NONLIVE_CAPTURE_NO_RETRY")
     folder = base / job["id"]
     response = read_bytes(safe_path(root, folder / "response.txt"))
@@ -1924,7 +2011,16 @@ def completed_live_job(root, base, job, row, *, confirm_closed=False):
     evidence = parse_json(read_bytes(safe_path(root, folder / "live-pilot.json")))
     if evidence.get("session_sha256") != digest(trace):
         raise BatchError("LIVE_TRACE_HASH_MISMATCH")
-    if evidence.get("alias_sha256") is not None:
+    if row.get("capture_source") == FULL_PRIMARY_SOURCE:
+        alias = read_bytes(safe_path(root, folder / "live-session-alias.snapshot"), MAX_LOG)
+        if (evidence.get("capture_source") != FULL_PRIMARY_SOURCE
+                or evidence.get("completion_evidence") != "FULL_PRIMARY_MALFORMED_ALIAS_STABLE_30S"
+                or evidence.get("full_primary_authorized") is not True
+                or evidence.get("independent_alias_agreement") is not False
+                or evidence.get("alias_sha256") != digest(alias)
+                or full_primary_candidate(trace, alias) != response):
+            raise BatchError("FULL_PRIMARY_EVIDENCE_MISMATCH")
+    elif evidence.get("alias_sha256") is not None:
         alias = read_bytes(safe_path(root, folder / "live-session-alias.snapshot"), MAX_LOG)
         if (digest(alias) != evidence["alias_sha256"] or
                 compare_capture_candidate(session_log_candidate(alias, live=True), response)
@@ -1942,7 +2038,7 @@ def is_windows():
 
 
 def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=False,
-               recover_clipboard_job=None, recover_prompt_job=None):
+               recover_clipboard_job=None, recover_prompt_job=None, allow_full_primary=False):
     """Sequential, bounded research run; user still verifies and submits each job."""
     if recover_clipboard_job is not None and recover_prompt_job is not None:
         raise BatchError("PRE_SUBMISSION_RECOVERY_REASON_CONFLICT")
@@ -1985,16 +2081,18 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
                     workspace(root, base, job, plan)
             used = summary["reserved_attempts"]
             new_count = 0
+            primary_options = {"allow_full_primary": True} if allow_full_primary else {}
             for job, row in zip(plan["jobs"], summary["jobs"]):
                 if row["id"] == recovery_job:
                     evidence = live_job(root, base, plan, job, pg, pyperclip,
-                                        recover_clipboard=True, recovery_reason=recovery_reason)
+                                        recover_clipboard=True, recovery_reason=recovery_reason,
+                                        **primary_options)
                 else:
                     if row["claim_exists"]:
                         continue
                     if used >= max_calls:
                         break
-                    evidence = live_job(root, base, plan, job, pg, pyperclip)
+                    evidence = live_job(root, base, plan, job, pg, pyperclip, **primary_options)
                     used += 1
                 new_count += 1
                 print("LIVE_JOB_CAPTURED=" + job["id"], flush=True)
@@ -2007,6 +2105,7 @@ def live_batch(root, bid, paired_bid, pilot_bid, max_calls, *, confirm_closed=Fa
                                     "fully_unattended": False,
                                     "recovered_clipboard_job": recover_clipboard_job,
                                     "recovered_prompt_job": recover_prompt_job,
+                                    "full_primary_policy_authorized": allow_full_primary,
                                     "provider_terminal_event_verified": False}
             return result
         finally:
@@ -2460,6 +2559,8 @@ def main(argv=None):
         p.add_argument("--max-calls", type=int, required=True)
         p.add_argument("--authorize-guided", action="store_true")
         p.add_argument("--confirm-previous-closed", action="store_true")
+        p.add_argument("--allow-full-primary", action="store_true",
+                       help="Research opt-in: degraded single full-trace capture with strict malformed alias checks")
     for name in ("report", "run", "stage", "recover-log", "recover-session"):
         p = sub.add_parser(name)
         p.add_argument("--root", required=True)
@@ -2521,7 +2622,8 @@ def main(argv=None):
             result = live_batch(args.root, bid, args.paired_batch, args.pilot_batch,
                                 args.max_calls, confirm_closed=args.confirm_previous_closed,
                                 recover_clipboard_job=getattr(args, "recover_clipboard_job", None),
-                                recover_prompt_job=getattr(args, "recover_prompt_job", None))
+                                recover_prompt_job=getattr(args, "recover_prompt_job", None),
+                                **({"allow_full_primary": True} if args.allow_full_primary else {}))
         elif args.command == "prepare":
             if args.live_session != bool(args.paired_batch) or (args.live_session and
                     (not args.guided or args.max_calls != 1 or args.probe_session)):
