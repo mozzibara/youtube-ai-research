@@ -1507,7 +1507,7 @@ def import_lecture_assets(source_root, manifest, approved_media_root):
 
 def prepare_lecture(root, source_root, manifest, start, seconds, models=None, trial="lecture-1"):
     """Read only an explicitly supplied prior private manifest and its validated assets."""
-    if type(start) is not int or not 0 <= start <= 86400 or type(seconds) is not int or not 30 <= seconds <= 120:
+    if type(start) is not int or not 0 <= start <= 86400 or type(seconds) is not int or not 30 <= seconds <= 300:
         raise BatchError("LECTURE_WINDOW_OUT_OF_RANGE")
     root = safe_root(root)
     ctx = lecture_source_context(source_root, manifest)
@@ -1892,6 +1892,7 @@ def recover_live_job(root, bid, job_id, *, operator_closed, operator_response=No
 
 
 LENGTH_SCHEMA = "wp3_equal_span_length_v1"
+LONG_LENGTH_SCHEMA = "wp3_equal_span_long_length_v1"
 LENGTH_MODEL = "gemini-3.8-flash-medium"
 LENGTHS = (30, 60, 120)
 
@@ -1944,30 +1945,90 @@ def prepare_length_plan(root, source_root, manifest, start, reuse_batch):
     return length_report(root, lid)
 
 
+def prepare_long_length_plan(root, source_root, manifest, prior_lid):
+    """Compare 120+120+60 with a single 300s clip over the same span."""
+    root, prior = load_length_plan(root, prior_lid)
+    if prior["schema"] != LENGTH_SCHEMA or prior["start_seconds"] > 86100:
+        raise BatchError("LONG_LENGTH_REQUIRES_SHORT_PLAN")
+    previous = length_report(root, prior_lid)
+    if previous["status"] != "COMPLETE":
+        raise BatchError("LONG_LENGTH_PRIOR_PLAN_INCOMPLETE")
+    start = prior["start_seconds"]
+    reused = prior["groups"][-1]["windows"][0]["batch_id"]
+    _, _, original = load_plan(root, reused)
+    rebuilt, _ = prepare_lecture(root, source_root, manifest, start, 120,
+                                 [j["model"] for j in original["jobs"]],
+                                 original["trial"])
+    if rebuilt != reused:
+        raise BatchError("LENGTH_REUSE_SOURCE_MISMATCH")
+    groups = []
+    for length in (120, 300):
+        windows = []
+        for offset in range(0, 300, length):
+            pos = start + offset
+            seconds = min(length, 300 - offset)
+            reuse = length == 120 and offset == 0
+            if reuse:
+                bid = reused
+            else:
+                bid, _ = prepare_lecture(root, source_root, manifest, pos, seconds,
+                                         [LENGTH_MODEL],
+                                         f"wp3-l300-s{pos}-d{seconds}")
+            windows.append({"start_seconds": pos, "duration_seconds": seconds,
+                            "batch_id": bid, "reused": reuse})
+        groups.append({"length_seconds": length, "windows": windows})
+    plan = {"schema": LONG_LENGTH_SCHEMA, "model": LENGTH_MODEL,
+            "start_seconds": start, "span_seconds": 300, "groups": groups,
+            "reference_scope": "COMMON_WHOLE_SPAN_CAPTION_PROXY",
+            "reuse_batch": reused, "prior_length_plan": prior_lid}
+    lid = length_id(plan)
+    write_once(root, Path("length-plans") / (lid + ".json"), json_bytes(plan))
+    return length_report(root, lid)
+
+
 def load_length_plan(root, lid):
     root = safe_root(root)
     if not re.fullmatch(r"length-[0-9a-f]{24}", lid):
         raise BatchError("INVALID_LENGTH_PLAN_ID")
     plan = parse_json(read_bytes(safe_path(root, Path("length-plans") / (lid + ".json"))))
-    if (not isinstance(plan, dict) or length_id(plan) != lid
-            or plan.get("schema") != LENGTH_SCHEMA or plan.get("model") != LENGTH_MODEL
-            or plan.get("span_seconds") != 120
+    if not isinstance(plan, dict) or length_id(plan) != lid:
+        raise BatchError("LENGTH_PLAN_INVALID")
+    if plan.get("schema") == LENGTH_SCHEMA:
+        span, lengths, reuse_length = 120, LENGTHS, 60
+    elif plan.get("schema") == LONG_LENGTH_SCHEMA:
+        span, lengths, reuse_length = 300, (120, 300), 120
+        prior_lid = plan.get("prior_length_plan")
+        if not isinstance(prior_lid, str) or not re.fullmatch(r"length-[0-9a-f]{24}", prior_lid):
+            raise BatchError("LONG_LENGTH_PRIOR_ID_INVALID")
+        # Read the predecessor without recursive plan traversal.
+        predecessor = parse_json(read_bytes(safe_path(
+            root, Path("length-plans") / (prior_lid + ".json"))))
+        if (not isinstance(predecessor, dict) or predecessor.get("schema") != LENGTH_SCHEMA
+                or length_id(predecessor) != prior_lid):
+            raise BatchError("LONG_LENGTH_REQUIRES_SHORT_PLAN")
+        _, predecessor = load_length_plan(root, prior_lid)
+        if (predecessor["start_seconds"] != plan.get("start_seconds")
+                or predecessor["groups"][-1]["windows"][0]["batch_id"] != plan.get("reuse_batch")):
+            raise BatchError("LONG_LENGTH_PREDECESSOR_MISMATCH")
+    else:
+        raise BatchError("LENGTH_PLAN_INVALID")
+    if (plan.get("model") != LENGTH_MODEL or plan.get("span_seconds") != span
             or plan.get("reference_scope") != "COMMON_WHOLE_SPAN_CAPTION_PROXY"
             or type(plan.get("start_seconds")) is not int
-            or not 0 <= plan["start_seconds"] <= 86280):
+            or not 0 <= plan["start_seconds"] <= 86400 - span):
         raise BatchError("LENGTH_PLAN_INVALID")
-    if [g.get("length_seconds") for g in plan["groups"]] != list(LENGTHS):
+    if [g.get("length_seconds") for g in plan["groups"]] != list(lengths):
         raise BatchError("LENGTH_GROUPS_INVALID")
     seen = set()
     for group in plan["groups"]:
         length = group["length_seconds"]
         windows = group["windows"]
-        if len(windows) != 120 // length:
+        if len(windows) != (span + length - 1) // length:
             raise BatchError("LENGTH_COVERAGE_INVALID")
         for offset, window in enumerate(windows):
-            reused = length == 60 and offset == 0
+            reused = length == reuse_length and offset == 0
             if (window.get("start_seconds") != plan["start_seconds"] + offset * length
-                    or window.get("duration_seconds") != length
+                    or window.get("duration_seconds") != min(length, span - offset * length)
                     or window.get("reused") is not reused
                     or (window["batch_id"] == plan["reuse_batch"]) != reused
                     or window["batch_id"] in seen):
@@ -2015,7 +2076,7 @@ def length_state(root, lid):
 
 def length_report(root, lid):
     root, plan, groups = length_state(root, lid)
-    # The 120-second batch carries the single common reference. Never sum
+    # The full-span batch carries the single common reference. Never sum
     # per-clip caption events, which can be duplicated at interior boundaries.
     _, _, _, base, whole = groups[-1][1][0]
     raw = read_bytes(safe_path(root, base / "evaluation-only" / "reference.txt"))
@@ -2049,7 +2110,7 @@ def length_report(root, lid):
                         "windows": rows})
     result = {"length_plan": lid, "status": "COMPLETE" if not pending else "PENDING",
               "model": LENGTH_MODEL, "start_seconds": plan["start_seconds"],
-              "span_seconds": 120, "pending_calls": len(pending),
+              "span_seconds": plan["span_seconds"], "pending_calls": len(pending),
               "pending_batches": pending, "common_reference_sha256": digest(raw),
               "reference_scope": "COMMON_WHOLE_SPAN_CAPTION_PROXY_NOT_HUMAN_TRUTH",
               "assembly": "CHRONOLOGICAL_CONCATENATION_NO_CORRECTION",
@@ -2066,6 +2127,8 @@ def run_length_plan(root, lid, paired_bid, pilot_bid, max_new_calls, *, authoriz
     if type(max_new_calls) is not int or not 0 <= max_new_calls <= 6:
         raise BatchError("LENGTH_CALL_LIMIT_INVALID")
     result = length_report(root, lid)
+    if result["span_seconds"] == 300 and max_new_calls > 3:
+        raise BatchError("LONG_LENGTH_CALL_LIMIT_INVALID")
     pending = result["pending_batches"]
     if len(pending) > max_new_calls:
         raise BatchError("LENGTH_PENDING_EXCEEDS_APPROVED_LIMIT")
@@ -2095,6 +2158,11 @@ def main(argv=None):
     lp.add_argument("--manifest", required=True)
     lp.add_argument("--start-seconds", type=int, required=True)
     lp.add_argument("--reuse-batch", required=True)
+    ll = sub.add_parser("long-length-plan")
+    ll.add_argument("--root", required=True)
+    ll.add_argument("--source-root", required=True)
+    ll.add_argument("--manifest", required=True)
+    ll.add_argument("--prior-length-plan", required=True)
     lr = sub.add_parser("length-report")
     lr.add_argument("--root", required=True)
     lr.add_argument("--length-plan", required=True)
@@ -2169,6 +2237,9 @@ def main(argv=None):
         elif args.command == "length-plan":
             result = prepare_length_plan(args.root, args.source_root, args.manifest,
                                          args.start_seconds, args.reuse_batch)
+        elif args.command == "long-length-plan":
+            result = prepare_long_length_plan(args.root, args.source_root, args.manifest,
+                                              args.prior_length_plan)
         elif args.command == "length-report":
             result = length_report(args.root, args.length_plan)
         elif args.command == "length-run":

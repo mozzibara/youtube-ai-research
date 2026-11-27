@@ -423,3 +423,20 @@ original claim, baseline and nonempty-trace checks apply; the immutable
 receipt distinguishes the prompt failure from a file-drop failure.
 No claim deletion or automatic retries. Resume length-run only after
 the recovered job is captured and its evidence validates.
+
+### WP3 equal-span 300-second extension
+
+After a completed v1 length plan, long-length-plan --prior-length-plan
+LENGTH_ID reuses the original 120-second capture. The supplied source
+manifest must reconstruct its exact original batch identity. Prepare
+two new baseline windows (120 seconds and a 60-second tail) and one
+300-second window, then compare the same complete 300-second span.
+Existing v1 plans remain valid; the extension has a separate immutable
+plan schema and predecessor link. The full-span reference is evaluated
+once per group and all captured empty transcripts count as missing
+content. Existing metric edit-cell limits remain in effect; null
+rates mean the metric was not computed, not zero errors.
+Only the research lecture preparation limit increases to 300 seconds;
+production workers are unchanged. The existing length-run command
+requires authorization and at most three new calls for the new schema.
+No automatic resubmission or replacement of the previous capture.

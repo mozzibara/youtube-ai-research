@@ -829,6 +829,72 @@ class ResearchBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(b.BatchError, "LENGTH_REUSE_SOURCE_MISMATCH"):
                 b.prepare_length_plan(self.root, self.root, "manifest", 90, original)
 
+    def complete_length_fixture(self, result):
+        for group in result["groups"]:
+            for window in group["windows"]:
+                if window["capture_status"] == "CAPTURED":
+                    continue
+                root, base, plan = b.load_plan(self.root, window["batch_id"])
+                job = plan["jobs"][0]
+                b.claim(root, base, job)
+                b.capture(root, base, job, b.json_bytes({
+                    "transcript": ("alpha " * (window["duration_seconds"] // 30)).strip(),
+                    "uncertainties": [], "status": "COMPLETE"}), 3)
+
+    def test_long_equal_span_reuses_short_plan_and_scores_tail(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "live_batch", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            with self.assertRaisesRegex(b.BatchError, "LONG_LENGTH_PRIOR_PLAN_INCOMPLETE"):
+                b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(prior)
+            result = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.assertEqual(result["span_seconds"], 300)
+            self.assertEqual(result["pending_calls"], 3)
+            self.assertEqual([[w["duration_seconds"] for w in g["windows"]]
+                              for g in result["groups"]], [[120, 120, 60], [300]])
+            self.assertEqual(result["groups"][0]["windows"][0]["batch_id"],
+                             prior["groups"][-1]["windows"][0]["batch_id"])
+            self.assertEqual(result, b.prepare_long_length_plan(
+                self.root, self.root, "manifest", prior["length_plan"]))
+            with self.assertRaisesRegex(b.BatchError, "LONG_LENGTH_CALL_LIMIT_INVALID"):
+                b.run_length_plan(self.root, result["length_plan"], "paired", "pilot", 4,
+                                  authorized=True)
+            self.complete_length_fixture(result)
+            final = b.length_report(self.root, result["length_plan"])
+            self.assertEqual(final["status"], "COMPLETE")
+            for group in final["groups"]:
+                self.assertEqual(group["common_span_metrics"]["normalized_cer"]["rate"], 0)
+                self.assertEqual(group["common_span_metrics"]["normalized_cer"]["reference_units"], 50)
+            self.assertEqual(b.length_report(self.root, prior["length_plan"])["span_seconds"], 120)
+
+    def test_long_equal_span_refuses_tampered_tail_and_unsettled_claim(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            result = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            root, plan = b.load_length_plan(self.root, result["length_plan"])
+            plan["groups"][0]["windows"][-1]["duration_seconds"] = 120
+            wrong = b.length_id(plan)
+            b.write_once(root, Path("length-plans") / (wrong + ".json"), b.json_bytes(plan))
+            with self.assertRaisesRegex(b.BatchError, "LENGTH_COVERAGE_INVALID"):
+                b.load_length_plan(root, wrong)
+            root, base, batch = b.load_plan(root, result["pending_batches"][0])
+            b.claim(root, base, batch["jobs"][0])
+            with self.assertRaisesRegex(b.BatchError, "LENGTH_UNSETTLED_CLAIM_NO_RETRY"):
+                b.length_report(root, result["length_plan"])
+
+    def test_lecture_long_window_limit(self):
+        with patch.object(b, "lecture_source_context", side_effect=b.BatchError("SOURCE_CHECK_REACHED")):
+            with self.assertRaisesRegex(b.BatchError, "SOURCE_CHECK_REACHED"):
+                b.prepare_lecture(self.root, self.root, "manifest", 60, 300)
+            with self.assertRaisesRegex(b.BatchError, "LECTURE_WINDOW_OUT_OF_RANGE"):
+                b.prepare_lecture(self.root, self.root, "manifest", 60, 301)
+
     def test_stage_prompt_retains_clipboard_and_pastes_once(self):
         from unittest.mock import Mock
         pg, clip, target = Mock(), Mock(), Mock()
