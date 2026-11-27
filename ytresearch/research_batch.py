@@ -2480,6 +2480,199 @@ def run_length_plan(root, lid, paired_bid, pilot_bid, max_new_calls, *, authoriz
     return result
 
 
+OVERLAP_SCHEMA = "wp3_right_extension_overlap_v1"
+
+
+def overlap_id(plan):
+    return "overlap-" + digest(json_bytes(plan))[:24]
+
+
+def exact_boundary_merge(left, right):
+    """Conservative text-only heuristic; never invent or change words.
+
+    Ambiguous repeated suffixes, short matches and absent matches are kept.
+    Original raw captures remain immutable; only a derived assembly is scored.
+    """
+    a, c = left.split(), right.split()
+    hits = [n for n in range(3, min(40, len(a), len(c)) + 1)
+            if a[-n:] == c[:n] and len(normalized(" ".join(c[:n]))) >= 12]
+    if len(hits) == 1:
+        n = hits[0]
+        return " ".join(c[n:]), {"status": "EXACT_UNIQUE_MATCH",
+                                 "candidate_count": 1, "removed_words": n}
+    return right, {"status": "AMBIGUOUS_MATCH" if hits else "NO_EXACT_MATCH",
+                   "candidate_count": len(hits), "removed_words": 0}
+
+
+def prepare_overlap_plan(root, source_root, manifest, prior_lid):
+    root, prior, groups = length_state(root, prior_lid)
+    if prior["schema"] != LONG_LENGTH_SCHEMA or length_report(root, prior_lid)["status"] != "COMPLETE":
+        raise BatchError("OVERLAP_COMPLETED_LONG_PLAN_REQUIRED")
+    baseline = groups[0][1]
+    start = prior["start_seconds"]
+    # Re-derive all baseline batches from the explicitly supplied source.
+    for window, _, _, _, batch in baseline:
+        rebuilt, _ = prepare_lecture(root, source_root, manifest, window["start_seconds"],
+                                     window["duration_seconds"],
+                                     [j["model"] for j in batch["jobs"]], batch["trial"])
+        if rebuilt != window["batch_id"]:
+            raise BatchError("OVERLAP_SOURCE_MISMATCH")
+    variants = []
+    for seconds in (0, 5, 10):
+        windows = []
+        for index, (window, _, _, _, _) in enumerate(baseline):
+            pos = window["start_seconds"]
+            duration = window["duration_seconds"] + (seconds if index < 2 else 0)
+            reuse = seconds == 0 or index == 2
+            if reuse:
+                bid = window["batch_id"]
+            else:
+                bid, _ = prepare_lecture(root, source_root, manifest, pos, duration,
+                                         [LENGTH_MODEL], f"wp3-overlap-s{pos}-o{seconds}")
+            windows.append({"batch_id": bid, "start_seconds": pos,
+                            "duration_seconds": duration, "reused": reuse})
+        variants.append({"overlap_seconds": seconds, "windows": windows})
+    plan = {"schema": OVERLAP_SCHEMA, "model": LENGTH_MODEL, "span_seconds": 300,
+            "start_seconds": start, "prior_length_plan": prior_lid,
+            "variants": variants, "geometry": "RIGHT_EXTENSION_FIXED_CORE_BOUNDARIES"}
+    oid = overlap_id(plan)
+    write_once(root, Path("overlap-plans") / (oid + ".json"), json_bytes(plan))
+    return overlap_report(root, oid)
+
+
+def overlap_report(root, oid):
+    root = safe_root(root)
+    if not re.fullmatch(r"overlap-[0-9a-f]{24}", oid):
+        raise BatchError("OVERLAP_ID_INVALID")
+    plan = parse_json(read_bytes(safe_path(root, Path("overlap-plans") / (oid + ".json"))))
+    if (not isinstance(plan, dict) or overlap_id(plan) != oid
+            or plan.get("schema") != OVERLAP_SCHEMA or plan.get("model") != LENGTH_MODEL
+            or plan.get("span_seconds") != 300
+            or plan.get("geometry") != "RIGHT_EXTENSION_FIXED_CORE_BOUNDARIES"):
+        raise BatchError("OVERLAP_PLAN_INVALID")
+    _, prior, groups = length_state(root, plan["prior_length_plan"])
+    if (prior["schema"] != LONG_LENGTH_SCHEMA or prior["start_seconds"] != plan["start_seconds"]
+            or length_report(root, plan["prior_length_plan"])["status"] != "COMPLETE"):
+        raise BatchError("OVERLAP_COMPLETED_LONG_PLAN_REQUIRED")
+    baseline = groups[0][1]
+    _, _, _, ref_base, ref_batch = groups[-1][1][0]
+    reference_raw = read_bytes(safe_path(root, ref_base / "evaluation-only" / "reference.txt"))
+    if digest(reference_raw) != ref_batch["reference_sha256"]:
+        raise BatchError("OVERLAP_REFERENCE_HASH_MISMATCH")
+    reference = reference_raw.decode("utf-8-sig")
+    if [v["overlap_seconds"] for v in plan["variants"]] != [0, 5, 10]:
+        raise BatchError("OVERLAP_VARIANTS_INVALID")
+    pending, seen, results = [], set(), []
+    for variant in plan["variants"]:
+        seconds = variant["overlap_seconds"]
+        if len(variant["windows"]) != 3:
+            raise BatchError("OVERLAP_GEOMETRY_INVALID")
+        rows, texts = [], []
+        for i, window in enumerate(variant["windows"]):
+            original, original_row, original_text, _, _ = baseline[i]
+            reuse = seconds == 0 or i == 2
+            duration = original["duration_seconds"] + (seconds if i < 2 else 0)
+            bid = window["batch_id"]
+            if (window["start_seconds"] != original["start_seconds"]
+                    or window["duration_seconds"] != duration or window["reused"] is not reuse
+                    or (bid == original["batch_id"]) != reuse):
+                raise BatchError("OVERLAP_GEOMETRY_INVALID")
+            if reuse:
+                row, text = original_row, original_text
+            else:
+                if bid in seen or bid in {w[0]["batch_id"] for _, ws in groups for w in ws}:
+                    raise BatchError("OVERLAP_DUPLICATE_BATCH")
+                seen.add(bid)
+                _, base, batch = load_plan(root, bid)
+                summary = report(root, bid)
+                source = parse_json(read_bytes(safe_path(root, base / "lecture-source.json")))
+                if (batch["reference_kind"] != "CAPTION_PROXY" or len(batch["jobs"]) != 1
+                        or batch["jobs"][0]["model"] != LENGTH_MODEL
+                        or source.get("batch_id") != bid or source.get("clip_sha256") != batch["media_sha256"]
+                        or source.get("start_seconds") != window["start_seconds"]
+                        or source.get("duration_seconds") != duration
+                        or source.get("source_manifest_assets_verified") is not True
+                        or abs(batch["media"]["duration_seconds"] - duration) > 1.1):
+                    raise BatchError("OVERLAP_WINDOW_EVIDENCE_MISMATCH")
+                job, row = batch["jobs"][0], summary["jobs"][0]
+                workspace(root, base, job, batch)
+                if row["status"] == "CAPTURED":
+                    completed_live_job(root, base, job, row)
+                    text = validate_response(read_bytes(
+                        safe_path(root, base / job["id"] / "response.txt")))["transcript"]
+                elif row["status"] == "PENDING" and not summary["reserved_attempts"]:
+                    text = None
+                    pending.append(bid)
+                else:
+                    raise BatchError("OVERLAP_UNSETTLED_CLAIM_NO_RETRY")
+            texts.append(text)
+            rows.append(dict(window, capture_status=row["status"],
+                             capture_source=row.get("capture_source"),
+                             model_reported_status=row.get("model_reported_status"),
+                             elapsed_seconds=row.get("elapsed_seconds"),
+                             transcript_nonempty=row.get("transcript_nonempty")))
+        complete = all(t is not None for t in texts)
+        raw_score = merged_score = None
+        boundaries = []
+        if complete:
+            raw = " ".join(texts)
+            assembled = [texts[0]]
+            for left, right in zip(texts, texts[1:]):
+                if seconds:
+                    part, detail = exact_boundary_merge(left, right)
+                else:
+                    part, detail = right, {"status": "NO_OVERLAP", "candidate_count": 0, "removed_words": 0}
+                assembled.append(part)
+                boundaries.append(detail)
+            raw_score = metrics(reference, raw)
+            merged_score = metrics(reference, " ".join(assembled))
+        elapsed = [r["elapsed_seconds"] for r in rows]
+        results.append({"overlap_seconds": seconds, "clip_count": 3,
+                        "total_media_seconds": 300 + 2 * seconds,
+                        "captured_clips": sum(t is not None for t in texts),
+                        "nonempty_clips": sum(bool(t.strip()) for t in texts if t is not None),
+                        "elapsed_seconds_sum": sum(elapsed) if complete and
+                        all(isinstance(t, (int, float)) for t in elapsed) else None,
+                        "raw_concatenation_metrics": raw_score,
+                        "exact_boundary_merge_metrics": merged_score,
+                        "boundary_candidates": boundaries, "windows": rows})
+    result = {"overlap_plan": oid, "status": "PENDING" if pending else "COMPLETE",
+              "model": LENGTH_MODEL, "span_seconds": 300, "start_seconds": plan["start_seconds"],
+              "pending_calls": len(pending), "pending_batches": pending, "variants": results,
+              "common_reference_sha256": digest(reference_raw),
+              "reference_scope": "COMMON_WHOLE_SPAN_CAPTION_PROXY_NOT_HUMAN_TRUTH",
+              "merge_scope": "EXACT_TEXT_HEURISTIC_NOT_VERIFIED_SPEECH_DUPLICATION",
+              "model_requests": 0}
+    encoded = json_bytes(result)
+    write_once(root, Path("overlap-plans") / "reports" / oid /
+               (digest(encoded)[:24] + ".json"), encoded)
+    return result
+
+
+def run_overlap_plan(root, oid, paired_bid, pilot_bid, max_new_calls, *, authorized,
+                     allow_full_primary=False):
+    if not authorized:
+        raise BatchError("GUIDED_AUTHORIZATION_REQUIRED")
+    if type(max_new_calls) is not int or not 0 <= max_new_calls <= 4:
+        raise BatchError("OVERLAP_CALL_LIMIT_INVALID")
+    pending = overlap_report(root, oid)["pending_batches"]
+    if len(pending) > max_new_calls:
+        raise BatchError("OVERLAP_PENDING_EXCEEDS_APPROVED_LIMIT")
+    validate_live_proofs(root, paired_bid, pilot_bid)
+    for bid in pending:
+        print("OVERLAP_BATCH=" + bid, flush=True)
+        live_batch(root, bid, paired_bid, pilot_bid, 1,
+                   allow_full_primary=allow_full_primary)
+        if bid in overlap_report(root, oid)["pending_batches"]:
+            raise BatchError("OVERLAP_BATCH_INCOMPLETE_NO_RETRY")
+    result = overlap_report(root, oid)
+    result["initial_pending_jobs"] = len(pending)
+    result["authorized_max_new_calls"] = max_new_calls
+    result["script_submitted_model_requests"] = 0
+    result.pop("model_requests", None)
+    return result
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2505,6 +2698,22 @@ def main(argv=None):
     lx.add_argument("--pilot-batch", required=True)
     lx.add_argument("--max-new-calls", required=True, type=int)
     lx.add_argument("--authorize-guided", action="store_true")
+    op = sub.add_parser("overlap-plan")
+    op.add_argument("--root", required=True)
+    op.add_argument("--source-root", required=True)
+    op.add_argument("--manifest", required=True)
+    op.add_argument("--prior-length-plan", required=True)
+    ore = sub.add_parser("overlap-report")
+    ore.add_argument("--root", required=True)
+    ore.add_argument("--overlap-plan", required=True)
+    orun = sub.add_parser("overlap-run")
+    orun.add_argument("--root", required=True)
+    orun.add_argument("--overlap-plan", required=True)
+    orun.add_argument("--paired-batch", required=True)
+    orun.add_argument("--pilot-batch", required=True)
+    orun.add_argument("--max-new-calls", required=True, type=int)
+    orun.add_argument("--authorize-guided", action="store_true")
+    orun.add_argument("--allow-full-primary", action="store_true")
     ta = sub.add_parser("trace-audit")
     ta.add_argument("--root", required=True)
     ta.add_argument("--batch", required=True)
@@ -2587,6 +2796,16 @@ def main(argv=None):
             result = run_length_plan(args.root, args.length_plan, args.paired_batch,
                                      args.pilot_batch, args.max_new_calls,
                                      authorized=args.authorize_guided)
+        elif args.command == "overlap-plan":
+            result = prepare_overlap_plan(args.root, args.source_root, args.manifest,
+                                          args.prior_length_plan)
+        elif args.command == "overlap-report":
+            result = overlap_report(args.root, args.overlap_plan)
+        elif args.command == "overlap-run":
+            result = run_overlap_plan(args.root, args.overlap_plan, args.paired_batch,
+                                      args.pilot_batch, args.max_new_calls,
+                                      authorized=args.authorize_guided,
+                                      allow_full_primary=args.allow_full_primary)
         elif args.command == "trace-audit":
             result = audit_job_traces(args.root, args.batch, args.job,
                                       operator_closed=args.confirm_closed,

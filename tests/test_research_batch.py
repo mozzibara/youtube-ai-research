@@ -888,6 +888,48 @@ class ResearchBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(b.BatchError, "LENGTH_UNSETTLED_CLAIM_NO_RETRY"):
                 b.length_report(root, result["length_plan"])
 
+    def test_exact_boundary_merge_unique_and_ambiguous(self):
+        right = "alpha bravo charlie delta"
+        part, info = b.exact_boundary_merge("before alpha bravo charlie", right)
+        self.assertEqual(part, "delta")
+        self.assertEqual(info["removed_words"], 3)
+        repeated = "alpha alpha alpha alpha alpha"
+        self.assertEqual(b.exact_boundary_merge(repeated, repeated)[1]["status"], "AMBIGUOUS_MATCH")
+        self.assertEqual(b.exact_boundary_merge("alpha bravo", "alpha bravo")[1]["removed_words"], 0)
+
+    def test_overlap_plan_reuses_baseline_and_scores_without_calls(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "live_batch", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            long_plan = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(long_plan)
+            result = b.prepare_overlap_plan(self.root, self.root, "manifest", long_plan["length_plan"])
+            self.assertEqual(result["pending_calls"], 4)
+            self.assertEqual([v["total_media_seconds"] for v in result["variants"]], [300,310,320])
+            self.assertEqual([v["captured_clips"] for v in result["variants"]], [3,1,1])
+            self.assertEqual(result, b.prepare_overlap_plan(self.root, self.root, "manifest", long_plan["length_plan"]))
+            with self.assertRaisesRegex(b.BatchError, "OVERLAP_PENDING_EXCEEDS_APPROVED_LIMIT"):
+                b.run_overlap_plan(self.root, result["overlap_plan"], "paired", "pilot", 3, authorized=True)
+            # Fill new fixtures with deterministic transcripts.
+            for bid in result["pending_batches"]:
+                root, base, batch = b.load_plan(self.root, bid)
+                job = batch["jobs"][0]
+                b.claim(root, base, job)
+                b.capture(root, base, job, b.json_bytes({
+                    "transcript": "alpha alpha alpha alpha",
+                    "uncertainties": [], "status": "COMPLETE"}), 3)
+            final = b.overlap_report(self.root, result["overlap_plan"])
+            self.assertEqual(final["status"], "COMPLETE")
+            self.assertEqual(final["pending_calls"], 0)
+            self.assertEqual(final["variants"][0]["raw_concatenation_metrics"]["normalized_cer"]["rate"], 0)
+            self.assertEqual(final["variants"][0]["raw_concatenation_metrics"],
+                             final["variants"][0]["exact_boundary_merge_metrics"])
+            for variant in final["variants"]:
+                self.assertEqual(variant["exact_boundary_merge_metrics"]["normalized_cer"]["reference_units"], 50)
+
     def test_lecture_long_window_limit(self):
         with patch.object(b, "lecture_source_context", side_effect=b.BatchError("SOURCE_CHECK_REACHED")):
             with self.assertRaisesRegex(b.BatchError, "SOURCE_CHECK_REACHED"):

@@ -489,3 +489,21 @@ agreement false. Valid conflicts, unknown layouts and other failed
 conditions remain review-only. No new submission or retry is introduced.
 Prior reconstructed captures are not reclassified. The offline trace
 audit now reports policy eligibility without changing capture state.
+
+### WP3 fixed-boundary overlap pilot
+
+overlap-plan takes a completed 300-second length plan and re-derives
+its three baseline batches against the explicit source manifest. Keep
+the core boundaries at 120+120+60 seconds and extend the first two
+windows to the right by 5 or 10 seconds, reusing the baseline and final
+60-second capture. Four new guided calls at most. The overall coverage
+is unchanged; total media input is 300, 310 or 320 seconds. The
+overlap-report compares naive concatenation and a conservative exact
+suffix/prefix word-match heuristic against the same whole-span caption
+proxy. Only a unique match of 3–40 whitespace words with at least 12
+normalized characters may be removed from the following segment.
+Ambiguous matches are left intact. This is NOT verified speech
+duplication; preserve all original transcripts and measure downstream
+error changes without claiming actual deletion accuracy. overlap-run
+requires explicit authorization, verifies captures/claims before
+continuation, and supports the existing explicit full-primary opt-in.
