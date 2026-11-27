@@ -545,3 +545,49 @@ Historical elapsed time, agent digest and exit code remain null;
 recovery provenance is HEADLESS_ARCHIVE_RECOVERY. New live receipts
 record HEADLESS_LIVE and the terminal document count. Subsequent
 context-run resumes only pending modes. No automatic resubmission.
+
+
+### WP3-C completed operator pilot and WP3-D offline selective retry
+
+Operator reported both context variants complete after archive recovery of
+CURRENT_ONLY (no repeat call) and one ADJACENT invocation. Target caption
+proxy normalized edits changed from 44/642 to 41/642 and 44/642 respectively;
+whole span from 73/1567 to 70/1567 and 73/1567. ADJACENT elapsed time was
+97.406 seconds; recovered elapsed time is unknown. No independent speech
+verification. These aggregate operator results do not establish semantic
+improvement or a general benefit from context. Default to no mandatory
+text correction; selective text inference remains a research candidate.
+
+WP3-D adds two offline subcommands to the existing research batch module:
+
+    python -m ytresearch.research_batch context-change-report --root PRIVATE_ROOT --context-plan EXISTING_CONTEXT_ID
+    python -m ytresearch.research_batch retry-report --root PRIVATE_ROOT --length-plan EXISTING_LONG_LENGTH_ID
+
+No new media, model, GUI, session scan or retry reservation. Reuse validated
+length-state captures and the existing predecessor plan. Compare 120+120+60
+with the 30- and 60-second tilings of the first 120 seconds plus the original
+tail. All-clip concatenation metrics are separate from replacement candidates.
+The oracle enumerates contiguous replacements with no explicit defects in
+the replacement and required adjacent anchors; it ranks by common whole-span
+normalized CER, raw CER, raw WER, then counterfactual invocation count. It is
+a restricted, exploratory oracle, not a general upper bound. No score is
+used by the blind selector, which only chooses a clean whole-span tiling
+for an empty original and otherwise keeps the original. Nonempty partial
+replacement proposals are review-only; four exact unique neighboring words
+can locate a textual splice but cannot prove temporal alignment or preserve
+every spoken word. Missing, repeated, inverted or uncertain anchors block
+the partial candidate. Clip endpoints are assumed for edge candidates.
+Model-reported status, uncertainty and unclear markers are signals only;
+normalized characters per second is descriptive and never a failure cutoff.
+Unlocalized issues remain whole-clip review. No independent source identity
+proof beyond the existing length-plan and lecture-capture validation.
+
+Reports contain hashes, offsets, counts, caption proxy scores and candidate
+provenance, not transcript strings; immutable private report paths are
+length-plans/retry-reports and context-plans/<id>/change-reports.
+Context changes count SequenceMatcher operation blocks, not Levenshtein edits;
+semantic correctness is unverified. The existing source texts and claims
+remain unchanged. Counterfactual request counts and elapsed time are reused
+observations, not provider inference count or quota measurements. Actual
+WP3-D quality and detection effectiveness remain pending operator offline
+evaluation. No additional model invocation is authorized by this change.
