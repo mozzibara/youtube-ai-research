@@ -1035,6 +1035,105 @@ class ResearchBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(b.BatchError, "CONTEXT_UNSETTLED_CLAIM_NO_RETRY"):
                 b.context_report(self.root, cid)
 
+    def test_retry_quality_does_not_flag_short_complete_speech(self):
+        self.assertEqual(b.retry_quality({"transcript": "yes", "status": "COMPLETE",
+                                          "uncertainties": []}), [])
+        self.assertEqual(b.retry_quality({"transcript": "", "status": "UNAVAILABLE",
+                                          "uncertainties": []}),
+                         ["UNAVAILABLE_SELF_REPORT", "EMPTY_TRANSCRIPT"])
+        self.assertEqual(b.retry_quality({"transcript": "[불명확]", "status": "PARTIAL",
+                                          "uncertainties": ["synthetic"]}),
+                         ["PARTIAL_SELF_REPORT", "EXPLICIT_UNCLEAR_MARKER", "MODEL_UNCERTAINTY"])
+
+    def test_retry_anchor_is_unique_and_preserves_surroundings(self):
+        texts = ["alpha beta gamma delta", "correct phrase", "epsilon zeta eta theta"]
+        original = "alpha beta gamma delta [불명확] epsilon zeta eta theta"
+        left, right = b.retry_anchor_span(original, texts, 1, 2)
+        self.assertEqual(original[left:right].strip(), "[불명확]")
+        self.assertIsNone(b.retry_anchor_span(original + " " + texts[0], texts, 1, 2))
+        self.assertIsNone(b.retry_anchor_span(texts[2] + " " + texts[0], texts, 1, 2))
+        self.assertIsNone(b.retry_anchor_span(original, ["alpha", texts[1], texts[2]], 1, 2))
+
+    def test_retry_candidates_blind_never_auto_replaces_nonempty(self):
+        texts = ["alpha beta gamma delta", "correct phrase", "epsilon zeta eta theta"]
+        clips = [{"response": {"transcript": t, "status": "COMPLETE", "uncertainties": []},
+                  "start_seconds": i * 60, "duration_seconds": 60,
+                  "batch_id": str(i), "response_sha256": str(i), "elapsed_seconds": None}
+                 for i, t in enumerate(texts)]
+        original = {"transcript": "alpha beta gamma delta [불명확] epsilon zeta eta theta",
+                    "status": "PARTIAL", "uncertainties": []}
+        candidates = b.retry_candidates(original["transcript"], [("fixture", clips)])
+        middle = next(c for c in candidates if c["id"] == "fixture:1:2")
+        self.assertEqual(middle["text"], " ".join(texts))
+        self.assertTrue(middle["contains_explicit_marker"])
+        self.assertIsNone(middle["counterfactual_elapsed_seconds"])
+        self.assertIsNone(b.retry_blind_choice(original, candidates))
+        missing = {"transcript": "", "status": "UNAVAILABLE", "uncertainties": []}
+        candidates = b.retry_candidates("", [("fixture", clips)])
+        self.assertTrue(b.retry_blind_choice(missing, candidates)["full"])
+        clips[1]["response"]["status"] = "PARTIAL"
+        self.assertIsNone(b.retry_blind_choice(missing, b.retry_candidates("", [("fixture", clips)])))
+
+    def test_retry_report_reuses_all_tilings_without_provider(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "live_batch", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            long_plan = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(long_plan)
+            lid = long_plan["length_plan"]
+            result = b.retry_report(self.root, lid)
+            self.assertEqual(result["model_requests"], 0)
+            self.assertEqual(result["new_media_seconds"], 0)
+            self.assertEqual(result["blind"]["selection"], "KEEP_ORIGINAL")
+            self.assertEqual(result["oracle"]["selection"], "KEEP_ORIGINAL")
+            self.assertEqual([len(x["clips"]) for x in result["tilings"]], [3, 6, 4])
+            self.assertEqual(result, b.retry_report(self.root, lid))
+            self.assertNotIn("alpha", json.dumps(result))
+            self.assertFalse(result["automatic_partial_replacement"])
+            _, _, groups = b.length_state(self.root, lid)
+            item = groups[-1][1][0]
+            folder, batch = item[3:5]
+            job = batch["jobs"][0]
+            b.safe_path(self.root, folder / job["id"] / "response.txt").write_bytes(b"tampered")
+            with self.assertRaisesRegex(b.BatchError, "CAPTURE_HASH_MISMATCH"):
+                b.retry_report(self.root, lid)
+
+    def test_context_change_report_existing_archives_only(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "context_cli_preflight", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            long_plan = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(long_plan)
+            cid = b.prepare_context_plan(self.root, long_plan["length_plan"])["context_plan"]
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_CHANGE_REQUIRES_COMPLETE"):
+                b.context_change_report(self.root, cid)
+            for mode in b.CONTEXT_MODES:
+                folder = Path("context-plans") / cid / mode
+                prompt = b.read_bytes(b.safe_path(self.root, folder / "prompt.txt"))
+                b.write_once(self.root, folder / "claim.json", b.json_bytes({
+                    "mode": mode, "prompt_sha256": b.digest(prompt),
+                    "reservation": "POSSIBLE_SUBMISSION"}))
+                obj = {"transcript": "alpha alpha alpha " + ("beta" if mode == "CURRENT_ONLY" else "alpha"),
+                       "uncertainties": [], "status": "COMPLETE"}
+                raw = json.dumps({"event": "result", "result": {
+                    "status": "SUCCESS", "response": json.dumps(obj)}}).encode()
+                b.write_once(self.root, folder / "stdout.snapshot", raw)
+                b.write_once(self.root, folder / "stderr.snapshot", b"")
+                b.recover_context_response(self.root, cid, mode, b.digest(raw), b.digest(b""),
+                                           b.digest(b.json_bytes(obj)))
+            result = b.context_change_report(self.root, cid)
+            self.assertEqual(result["model_requests"], 0)
+            self.assertGreater(result["variants"][0]["normalized_changes"]["removed_chars"], 0)
+            self.assertEqual(result["variants"][1]["normalized_changes"]["removed_chars"], 0)
+            self.assertNotIn("alpha", json.dumps(result))
+            self.assertEqual(result, b.context_change_report(self.root, cid))
+
     def test_lecture_long_window_limit(self):
         with patch.object(b, "lecture_source_context", side_effect=b.BatchError("SOURCE_CHECK_REACHED")):
             with self.assertRaisesRegex(b.BatchError, "SOURCE_CHECK_REACHED"):
