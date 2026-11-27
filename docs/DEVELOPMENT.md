@@ -440,3 +440,15 @@ Only the research lecture preparation limit increases to 300 seconds;
 production workers are unchanged. The existing length-run command
 requires authorization and at most three new calls for the new schema.
 No automatic resubmission or replacement of the previous capture.
+
+### Bounded text clipboard recovery
+
+If the Windows clipboard cannot be opened for prompt copy or read,
+retry only local copy/read operations up to five attempts (backoff
+0.5, 1, 2, 3 seconds). Recheck the target window on each attempt.
+Do not retry focus failures, clipboard content mismatches, media paste,
+prompt paste, or model submission. After exhaustion raise the stable
+PROMPT_CLIPBOARD_ACCESS_FAILED code, without the native exception
+details. An interrupted pre-submit prompt-copy failure is eligible for
+the existing explicitly attested one-time recover-prompt-job route,
+only after closing the old window and passing its trace/claim checks.

@@ -444,12 +444,37 @@ def prepare_file_drop(helper, media):
 
 def stage_prompt(pg, pyperclip, target):
     """Verify the local clipboard, paste once, and retain the prompt."""
-    target()
-    pyperclip.copy(PROMPT)
-    target()
-    observed = pyperclip.paste()
-    if not isinstance(observed, str) or observed.replace("\r\n", "\n") != PROMPT:
-        raise BatchError("PROMPT_CLIPBOARD_VERIFY_FAILED")
+    # The optional Windows GUI dependency is not imported by offline CI.
+    # Match its actual exception classes, not arbitrary GUI/focus errors.
+    errors = [OSError]
+    for name in ("PyperclipException", "PyperclipWindowsException"):
+        cls = getattr(pyperclip, name, None)
+        if isinstance(cls, type) and issubclass(cls, Exception):
+            errors.append(cls)
+    clipboard_errors = tuple(errors)
+    delays = (.5, 1, 2, 3)
+    for attempt in range(len(delays) + 1):
+        target()
+        try:
+            pyperclip.copy(PROMPT)
+        except clipboard_errors:
+            pass
+        else:
+            # Focus/identity errors are not retried as clipboard errors.
+            target()
+            try:
+                observed = pyperclip.paste()
+            except clipboard_errors:
+                pass
+            else:
+                if not isinstance(observed, str) or observed.replace("\r\n", "\n") != PROMPT:
+                    raise BatchError("PROMPT_CLIPBOARD_VERIFY_FAILED")
+                break
+        if attempt == len(delays):
+            raise BatchError("PROMPT_CLIPBOARD_ACCESS_FAILED")
+        print("PROMPT_CLIPBOARD_RETRY=" + str(attempt + 1), flush=True)
+        time.sleep(delays[attempt])
+    # Only the local clipboard operations can retry; never repeat a paste.
     pg.hotkey("ctrl", "v", interval=.1)
     time.sleep(1)
     # Clipboard agreement is not proof that the TUI accepted the paste.

@@ -910,6 +910,54 @@ class ResearchBatchTests(unittest.TestCase):
             b.stage_prompt(pg, clip, target)
         pg.hotkey.assert_not_called()
 
+    def test_stage_prompt_retries_transient_clipboard_copy_and_read_only(self):
+        from unittest.mock import Mock
+        class ClipboardBusy(Exception):
+            pass
+        pg, clip, target = Mock(), Mock(), Mock()
+        clip.PyperclipWindowsException = ClipboardBusy
+        clip.copy.side_effect = [ClipboardBusy("private detail"), None, None]
+        clip.paste.side_effect = [ClipboardBusy("private detail"), b.PROMPT]
+        with patch.object(b.time, "sleep") as sleep:
+            b.stage_prompt(pg, clip, target)
+        self.assertEqual(clip.copy.call_count, 3)
+        self.assertEqual(clip.paste.call_count, 2)
+        pg.hotkey.assert_called_once_with("ctrl", "v", interval=.1)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [.5, 1, 1])
+
+    def test_stage_prompt_persistent_clipboard_failure_has_no_paste(self):
+        from unittest.mock import Mock
+        class ClipboardBusy(Exception):
+            pass
+        pg, clip, target = Mock(), Mock(), Mock()
+        clip.PyperclipWindowsException = ClipboardBusy
+        clip.copy.side_effect = ClipboardBusy("private detail")
+        with patch.object(b.time, "sleep") as sleep:
+            with self.assertRaisesRegex(b.BatchError, "^PROMPT_CLIPBOARD_ACCESS_FAILED$"):
+                b.stage_prompt(pg, clip, target)
+        self.assertEqual(clip.copy.call_count, 5)
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [.5, 1, 2, 3])
+        clip.paste.assert_not_called()
+        pg.hotkey.assert_not_called()
+
+    def test_stage_prompt_does_not_retry_focus_or_paste_errors(self):
+        from unittest.mock import Mock
+        pg, clip, target = Mock(), Mock(), Mock()
+        clip.paste.return_value = b.PROMPT
+        target.side_effect = [None, OSError("focus failed")]
+        with patch.object(b.time, "sleep"):
+            with self.assertRaisesRegex(OSError, "focus failed"):
+                b.stage_prompt(pg, clip, target)
+        self.assertEqual(clip.copy.call_count, 1)
+        pg.hotkey.assert_not_called()
+        target.side_effect = None
+        pg.hotkey.side_effect = OSError("paste failed")
+        with patch.object(b.time, "sleep"):
+            with self.assertRaisesRegex(OSError, "paste failed"):
+                b.stage_prompt(pg, clip, target)
+        self.assertEqual(clip.copy.call_count, 2)
+        pg.hotkey.assert_called_once_with("ctrl", "v", interval=.1)
+
     def test_prompt_recovery_preserves_claim_and_records_distinct_reason(self):
         bid = self.prepare()
         root, base, plan = b.load_plan(self.root, bid)
