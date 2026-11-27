@@ -930,6 +930,46 @@ class ResearchBatchTests(unittest.TestCase):
             for variant in final["variants"]:
                 self.assertEqual(variant["exact_boundary_merge_metrics"]["normalized_cer"]["reference_units"], 50)
 
+    def test_context_terminal_requires_single_success_and_agreement(self):
+        response = {"transcript": "alpha", "uncertainties": [], "status": "COMPLETE"}
+        terminal = {"event": "result", "result": {"status": "SUCCESS",
+                    "structured_output": response, "response": json.dumps(response)}}
+        raw = json.dumps(terminal).encode()
+        self.assertEqual(b.context_terminal_response(raw), response)
+        with self.assertRaisesRegex(b.BatchError, "CONTEXT_STREAM_INVALID"):
+            b.context_terminal_response(raw + b"\n" + raw)
+        terminal["result"]["response"] = json.dumps(dict(response, transcript="other"))
+        with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_CONFLICT"):
+            b.context_terminal_response(json.dumps(terminal).encode())
+
+    def test_context_plan_isolates_inputs_and_blocks_unsettled_claim(self):
+        original, prepare_clip = self.length_fixture()
+        with patch.object(b, "prepare_lecture", side_effect=prepare_clip), patch.object(
+                b, "completed_live_job", return_value={}), patch.object(
+                b, "context_cli_preflight", side_effect=AssertionError("no provider")):
+            prior = b.prepare_length_plan(self.root, self.root, "manifest", 60, original)
+            self.complete_length_fixture(prior)
+            long_plan = b.prepare_long_length_plan(self.root, self.root, "manifest", prior["length_plan"])
+            self.complete_length_fixture(long_plan)
+            result = b.prepare_context_plan(self.root, long_plan["length_plan"])
+            cid = result["context_plan"]
+            self.assertEqual(result["pending_calls"], 2)
+            self.assertEqual(result["baseline"]["common_span_metrics"]["normalized_cer"]["rate"], 0)
+            self.assertEqual(result, b.prepare_context_plan(self.root, long_plan["length_plan"]))
+            base = Path("context-plans") / cid
+            for mode in b.CONTEXT_MODES:
+                prompt = b.read_bytes(b.safe_path(self.root, base / mode / "prompt.txt"))
+                data = json.loads(prompt.decode().split("\nDATA_JSON:\n", 1)[1])
+                self.assertEqual(set(data), {"target"} if mode == "CURRENT_ONLY"
+                                 else {"previous", "target", "following"})
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_AUTHORIZATION_REQUIRED"):
+                b.run_context_plan(self.root, cid, 2, authorized=False)
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_PENDING_EXCEEDS_APPROVED_LIMIT"):
+                b.run_context_plan(self.root, cid, 1, authorized=True)
+            b.write_once(self.root, base / "CURRENT_ONLY" / "claim.json", b"{}")
+            with self.assertRaisesRegex(b.BatchError, "CONTEXT_UNSETTLED_CLAIM_NO_RETRY"):
+                b.context_report(self.root, cid)
+
     def test_lecture_long_window_limit(self):
         with patch.object(b, "lecture_source_context", side_effect=b.BatchError("SOURCE_CHECK_REACHED")):
             with self.assertRaisesRegex(b.BatchError, "SOURCE_CHECK_REACHED"):

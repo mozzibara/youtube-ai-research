@@ -507,3 +507,23 @@ duplication; preserve all original transcripts and measure downstream
 error changes without claiming actual deletion accuracy. overlap-run
 requires explicit authorization, verifies captures/claims before
 continuation, and supports the existing explicit full-primary opt-in.
+
+### WP3 text context pilot
+
+context-plan uses the completed 300-second length plan's three
+nonoverlapping captures. Target is the middle 120-second transcript;
+CURRENT_ONLY and ADJACENT use the same target and instruction, differing
+only in whether the previous and following captured texts are supplied.
+Caption references are evaluation-only; no media, captions or source
+files are placed in the temporary CLI working directory. context-run
+requires explicit headless authorization, a maximum of two calls,
+AGY 1.5.16 and the requisite help flags; uses the existing no-tools
+agent and sandbox, one CLI invocation per reserved variant, no retry.
+The prompt is a process argument; OS isolation and no-tools enforcement
+are not independently verified. Terminal SUCCESS and a single
+schema-valid result are required, with agreement if both structured
+and string response fields are present. Raw stdout/stderr and derived
+responses are private and immutable; a failed or interrupted reservation
+blocks further runs. No model response is accepted as observed speech:
+compare baseline, target and whole-span caption metrics and change
+from raw, without altering the original transcription.
