@@ -34,3 +34,560 @@ Windows and Ubuntu CI both must pass. Use `pull_request` checks with `contents: 
 - The public `publish-batch` command is always disabled: see `docs/PUBLIC_RUNTIME_BOUNDARY.md`.
 - Running some other live processing command manually can still call external tools; request separate authorization before any real use.
 - Phase 5F needs a separate Draft PR, offline adapter injection, immutable staged artifacts and safe budget settlement tests before a real pilot.
+
+
+## WP1 — context-enhanced transcription research (proposed scope, 2026-11-25)
+
+The target is faithful, useful speech transcription, not perfect orthographic
+verbatim, silence classification or non-speech acoustic analysis. A01 is a
+historical positive-control replay (semantic nonce match; numeric spelling
+differs; reconstructed TUI response; no timing coverage). A02 and A03 are
+historical diagnostics outside the revised product scoring scope. Preserve all
+existing private evidence, including the unsaved A03 evaluation inputs. A04/A05
+and further silence/tone calls are deferred. Never reinterpret those historical
+tests as broad accuracy or provider-ingress proof.
+
+Audit baseline: main after PR #30; the existing manual_verbatim single-input
+contract, immutable persistence and path guards, media probe, clipboard helper,
+headless text JSON parser and batch budget/checkpoint code remain reusable. The
+existing GUI probe stages native input but its submitted route does not establish
+attachment-chip validity before Enter, and its file-writing response contract
+differs from this tool-free transcription task. The Phase 5F worker is synthetic
+only. PR #29's separate read_file byte and transport audit remains open and
+unmodified; it is not a dependency of speech-quality research.
+
+### Research batch entrypoint (not a production worker)
+
+Run from the public checkout using the current Python environment:
+
+    python -m ytresearch.research_batch probe
+
+Only version/help are queried from AGY. Flags are capability hints, not proof
+of native headless media input or response logging. There is no automatic
+brain-directory scan, arbitrary CLI invocation, or model submission. A native
+headless MP4 attachment path and reliable machine-readable response capture
+are still unverified. No Windows GUI validation has been performed by CI.
+
+Prepare a batch with an existing, explicitly approved private runtime directory
+and a local MP4 relative to that directory (no URL acquisition or private archive
+discovery). Optional reference is a UTF-8 text file relative to the same private
+root. Reference kinds distinguish unverified text, caption proxy and an
+operator-declared human-reviewed reference; the declaration is not independent
+proof. Example placeholders only:
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --reference references\sample.txt --reference-kind CAPTION_PROXY
+
+Preparation validates video/audio streams and decodes the clip, builds separate
+media-only directories, hashes media and common prompt, snapshots the optional
+reference outside every model working directory, and generates a content-addressed
+batch plan. All six candidate models are included by default. To select a subset
+use --models and the exact allowed IDs; --trial distinguishes deliberate repeats.
+The root must exist outside Git. All real files, captures, plans and reports
+remain private. No additional source assets are searched. This is a trusted local
+operator boundary, not protection against a hostile concurrent filesystem actor.
+
+No-submit Windows smoke, before live experiments:
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-3.8-flash-medium --stage-only
+
+The same mode can be run against an existing unsubmitted plan using the stage
+subcommand with --root and --batch. Type READY only after the correct AGY
+session is visibly ready. The script stages media and prompt, but the operator
+must not submit; verify the chip/prompt, close AGY, and type STAGED. This
+records an operator declaration, not a provider receipt. It consumes no
+submission reservation. The script itself never presses Enter.
+
+Optional guided Windows mode, only for media authorized for provider submission:
+
+    python -m ytresearch.research_batch run --root D:\private-runtime --batch BATCH_ID --authorize-guided --max-calls 1
+
+Or use prepare with --guided --max-calls 1 to combine the steps. Increase the
+total attempt ceiling only with owner authorization (maximum six per batch).
+Install optional GUI requirements using the existing setup script if needed.
+The controller checks flags and dependencies, reserves a possible submission
+before launching a uniquely identified terminal, asks the operator to verify
+readiness, then stages MP4 and prompt using the existing clipboard/focus
+helpers. The operator must visually verify the correct media chip and prompt,
+submit exactly once, copy the response JSON, close AGY and type CAPTURE in the
+controller. The controller never types Enter, approves trust dialogs, or retries.
+The clipboard source is not provider-original bytes. A missing/invalid capture,
+unsettled claim or unexpected open window stops the batch. A stale controller
+lock is deliberately not automatically reclaimed. Review local evidence before
+starting any new trial. Do not retry uncertain submissions merely because a
+response was not captured.
+
+    python -m ytresearch.research_batch report --root D:\private-runtime --batch BATCH_ID
+
+Reports contain aggregate metrics/status, not transcript content. Raw captures
+are immutable and hashed; invalid captures are retained. CER/WER measure
+reference agreement, normalized CER removes whitespace/punctuation only.
+Empty valid responses are scored as complete reference deletions when a
+nonempty reference exists, not silently excluded from quality scoring.
+No automatic numeric equivalence, semantic judgment, human verification or
+quota estimate is fabricated. A nonempty model response is not a quality pass.
+Attempt reservations are not verified billable requests. Wall-clock timing is
+operator-inclusive and not provider latency. Provider ingress, OS isolation,
+and quota accounting are unverified. No source or transcript is published.
+
+Next: validate this guided path on Windows without submitting until attachment
+readiness is verified; after owner-approved real sample and call budget, compare
+six models on identical speech, reuse captures for context correction, select
+clip lengths, and only then develop the production pipeline. A fully unattended
+MP4 adapter remains a blocker; do not enable automatic submission based solely
+on help flags or keyboard timing.
+
+### WP1 paired response capture pilot
+
+After the no-submit Windows smoke succeeds, use the same unsubmitted
+single-model synthetic batch for one explicitly authorized call:
+
+    python -m ytresearch.research_batch run --root D:\private-runtime --batch BATCH_ID --authorize-guided --max-calls 1 --probe-log
+
+This opt-in mode adds a unique, private --log-file destination to the same TUI
+launcher. It also snapshots only immediate directory names under the documented
+AGY brain directory before launch, and after closure reads at most the direct
+transcript_full.jsonl in a unique newly created directory. No existing session
+file is opened, no recursive search is performed, and multiple new directories
+are ambiguous. A session candidate requires exactly one matching prompt turn
+and a completed, schema-valid MODEL planner response without recorded tool calls.
+A dedicated CLI log candidate requires a unique terminal SUCCESS result event,
+not debug text or partial deltas. Preserve the actual clipboard capture first.
+Compare the candidates with the clipboard JSON; keep log snapshots and results
+only inside the private batch. A matching pair is evidence for this session,
+not proof of automated completion detection, provider ingress or future stability.
+If neither candidate is available, the pilot still preserves the manual capture;
+do not resubmit just to obtain logs. The operator must copy the response before
+closing AGY and type CAPTURE manually. No automatic Enter or retry.
+
+### Interrupted paired capture recovery
+
+If CAPTURED was printed but the terminal closure check blocked the log probe,
+close only that experiment window. Do not send another prompt. Run:
+
+    python -m ytresearch.research_batch recover-log --root D:\private-runtime --batch BATCH_ID --confirm-closed
+
+Recovery checks the existing single-job claim and receipt, response hash, and
+schema. It inspects only a unique dedicated agy-<32 hex>.log in that job folder,
+or reuses an existing completed probe. No AGY, GUI, clipboard or new claims.
+Missing/ambiguous logs are reported without guessing. The historical before
+session directory snapshot was held in memory, so it cannot be recovered from
+this stopped process; no old brain session is scanned. A new guided call now
+allows a short window-teardown grace period and a close confirmation before
+stopping with its already preserved capture. A captured UNAVAILABLE response
+is a speech-quality failure, not proof of successful transcription.
+
+### Session-first capture follow-up
+
+The first local dedicated CLI log was text diagnostics and contained no
+recognizable matching response. Prefer the session trace; do not expand the
+CLI debug parser on this evidence. The prelaunch directory inventory is now
+persisted privately. If interrupted, recover using recover-session with
+--confirm-closed. Historical recovery without an inventory follows only a
+unique explicit UUID-valued session/conversation/cascade ID in the verified
+dedicated log snapshot; it never searches old transcript contents or guesses
+from timestamps. If no exact identifier exists, it reads zero session logs.
+
+    python -m ytresearch.research_batch recover-session --root D:\private-runtime --batch BATCH_ID --confirm-closed
+
+For an explicitly approved new single-call paired pilot without --log-file:
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-3.8-flash-medium --trial session-pilot-1 --guided --max-calls 1 --probe-session
+
+The usual READY, manual single submit, clipboard copy, close and CAPTURE
+remain for this pilot only. Session comparison runs after closure and can be
+recovered without resubmission. Only allowlisted schema counts are reported;
+raw trace is retained privately only after prompt/response correlation.
+A paired match does not establish autonomous completion or speech accuracy.
+
+### Nested session traces and UTF-8 evaluation
+
+Local AGY 1.5.16 inventory revealed transcript.jsonl and transcript_full.jsonl
+two levels below the uniquely identified session directory. Recovery now
+searches only that correlated directory, at most depth two and 500 entries,
+for the two exact known filenames. It reads at most two bounded traces,
+rejects reparse points and conflicting candidate contents, and requires
+strict prompt/final-response correlation with the preserved clipboard JSON.
+Identical file length is not identity; hashes and parsed response agreement
+are reported. Structural counts are private-safe and do not expose trace
+text. Existing direct-file recovery remains supported. No new model call is
+required. Use recover-session with the existing batch and --confirm-closed.
+
+Reference evaluation must read approved UTF-8 files directly, not non-ASCII
+Python literals piped through Windows PowerShell's default native encoding.
+A reference with no normalized characters is rejected instead of producing
+a misleading score. Earlier diagnostic scores with an empty normalized
+reference are invalid, not an ASR failure. Preserve the old diagnostic
+artifact. The historical synthetic reference remains a proxy, not human
+listening evidence.
+
+### Session content wrapper and one-call live capture pilot
+
+Observed local traces store the user prompt inside additional text and the
+MODEL response in one Markdown JSON fence. The parser accepts a unique
+whitespace-normalized prompt inclusion only for a two-row USER_EXPLICIT/DONE
+turn with one media record and one MODEL/DONE planner response, with no
+recorded tool calls. It unwraps only a complete single code fence; it never
+extracts arbitrary embedded JSON or accepts trailing commentary. Recovery
+still requires equality to the preserved clipboard JSON.
+
+A separate opt-in single-call pilot (same media hash as a paired recovery)
+requires the existing recovered trace to match its clipboard capture before
+launch. It reserves one possible submission and persists a private session
+baseline. The operator verifies the model, types READY, verifies the actual
+attachment/prompt, and presses Enter once. The script never submits a prompt.
+It polls only the unique new session for both identical known traces and a
+schema-valid two-row completed turn stable for five seconds; saves the
+trace and parsed response with a distinct capture-source receipt; then asks
+only the uniquely titled newly created window to close. It never kills
+processes or approves dialogs. A timeout, ambiguity, or unsettled claim
+blocks retry. DONE plus stability is a pilot heuristic, not proof of a
+provider terminal event, media ingress, or production unattended operation.
+
+    python -m ytresearch.research_batch prepare --root D:\private-runtime --media clips\sample.mp4 --models gemini-4-hydrogen-high --trial live-pilot-1 --guided --max-calls 1 --live-session --paired-batch PAIRED_BATCH_ID
+
+Do not start other AGY sessions during this pilot. If a close confirmation
+dialog remains, close only the experiment window manually. Existing capture
+is preserved. No raw trace, identifier or transcript is printed in reports.
+
+### WP2 entry: sequential live lecture batch (owner-guided)
+
+After a successful paired recovery and a separate live session pilot, reuse
+those two private capability proofs to gate a new clip (not proof of media
+ingress for that clip). AGY 1.5.16 is pinned for this experimental route.
+Use the explicitly approved prior private Runtime manifest, not a search of
+other files. The existing manual-verbatim validator verifies the manifest and
+asset hashes; the new helper extracts a 30--120s H.264 640x360 1fps/AAC
+16kHz mono clip from the manifest's primary video and audio stream. Source
+files are unchanged. Caption JSON3, if already specified by the manifest,
+is used only as an unreviewed overlapping-event evaluation proxy; it is
+never supplied to the transcription model. Boundary events can overcount
+speech, automatic captions can omit/misrecognize words, and no human
+accuracy claim is made. Private paths and actual text are not printed.
+
+    python -m ytresearch.research_batch lecture-batch --root D:\private-experiments --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json --start-seconds 60 --duration-seconds 60 --paired-batch PAIRED_ID --pilot-batch LIVE_PILOT_ID --max-calls 6 --authorize-guided
+
+Check account quota before execution and on each model readiness screen.
+The default candidates are the six allowlisted models, sequentially. Each
+requires READY after confirming model identity and a single manual Enter
+after inspecting the actual media chip and prompt. The existing automatic
+log capture and targeted close are reused; no copy, CAPTURE, or manual
+evaluation is needed. A valid UNAVAILABLE response is retained as a quality
+failure and does not trigger retries. Timeout, ambiguous session, unresolved
+claim, or unexpected closure stops the batch. Never launch other AGY sessions
+during it. No automated submission or quota-meter inference.
+
+Resume the same content-addressed batch with live-batch --root ... --batch ...
+--paired-batch ... --pilot-batch ... --max-calls 6 --authorize-guided. The cap
+includes already reserved jobs. Completed captures and trace integrity are
+checked before reuse; no unsettled claim is retried. Only if the prior window
+has actually been closed, use --confirm-previous-closed. A global lock
+serializes this new live-batch mode; do not concurrently run legacy tools.
+All source/response artifacts remain private.
+
+### Lecture source validation diagnostics
+
+The first actual lecture attempt stopped with a generic VerbatimError before
+any model submission. Preserve the source validator's specific allowlisted
+codes (e.g. ASSET_HASH_MISMATCH, MANIFEST_NOT_FOUND), without exporting paths
+or arbitrary exception messages. No validation policy is relaxed. The new
+read-only command uses exactly the same source context validator as the
+lecture preparation path:
+
+    python -m ytresearch.research_batch lecture-source-check --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json
+
+It reports only status, a safe failure code or verified asset roles/count,
+and zero model requests. Do not repair hashes, change asset paths or bypass
+the original manifest to make it pass. If the check succeeds, the existing
+lecture-batch command remains the normal continuation. A failed check must
+stop before opening AGY.
+
+### Numeric legacy pilot manifest compatibility (WP2 only)
+
+The historical pilot generator used integer schema_version 1 and
+OFFLINE_INPUT_VERIFIED status. The newer manual-verbatim validator rejects
+explicit numeric versions by default. WP2 source validation now explicitly
+opts into this one historical format, without changing the manifest on disk.
+It remains a legacy four-role contract, not verbatim_single_v1, and requires
+the verified 77-entry source ledger, registered video, all four assets,
+byte lengths, SHA-256 and existing path boundaries. Boolean, floating-point,
+string or other numeric versions, conflicting contract fields and wrong
+status are rejected. All other callers retain the old default behavior.
+Missing/invalid legacy ledgers receive distinct safe error codes; never
+manufacture a registry or replace recorded hashes to pass validation.
+No source media, manifests or private ledger are committed.
+
+### Explicit legacy media import
+
+The historical pilot manifest may point to media in the old private project's
+data/videos tree rather than the standalone Runtime. Its ordinary source
+check correctly rejects ASSET_OUTSIDE_RUNTIME. The new offline lecture-import
+command accepts an explicitly named media root and reads only the four exact
+manifest asset paths under that video's media directory. It validates the
+legacy ledger, paths, extensions, sizes and recorded hashes before writing.
+It copies bytes into data/wp2-imports/<manifest digest>/assets in the
+approved non-Git Runtime, verifies the copies, and writes a distinct minimal
+legacy manifest and receipt. No overwrite, original hardlinks, arbitrary
+file discovery, or source edits. The unchanged lecture source validator
+must accept the resulting manifest. Repeated import reuses verified copies.
+Use the returned relative manifest for lecture-batch. No AGY calls occur
+during import. This is not a permission expansion of the normal validator.
+
+    python -m ytresearch.research_batch lecture-import --source-root D:\approved-Runtime --manifest data\pilot_candidate_1_manifest.json --approved-media-root D:\old-private\data\videos
+
+### Clipboard staging failure and one-time guided recovery
+
+A local CF_HDROP set/read failure before Alt+V and prompt insertion does not
+settle the existing possible-submission claim. Retry only the local helper
+up to three times (never paste or submit again). Safe failure markers avoid
+printing local paths. The ordinary live-batch resume still refuses every
+unsettled claim. For a specifically observed CLIPBOARD_FILE_DROP_FAILED,
+the owner may close the failed experiment window, verify they never pressed
+Enter/submitted, and explicitly identify the first unfinished claimed job
+with --recover-clipboard-job JOB_ID. Do not use for timeouts or any
+uncertain submission. The controller requires the original claim and
+baseline, a single prior launcher, no visible old titled window, at most
+one new session and no nonempty known trace. Missing traces are not proof
+of no provider request. The owner's attestation is recorded in an immutable
+one-time receipt, the old claim/baseline remain, and a separate baseline
+is used for the recovered attempt. A recovery interruption is not retried.
+The reserved job counts once toward the original total cap; no automated
+submission is performed. Completed jobs are validated and reused.
+
+### Interrupted live capture recovery and diagnostic polling
+
+A completed TUI response can precede the controller's strict two-alias
+capture gate. No automatic retry or claim removal. Both known aliases may
+now differ in byte layout but must independently have a single correlated
+user turn, one media record, a final MODEL/DONE valid JSON response and
+equal parsed responses. Additional rows are allowed only if completed
+MODEL planner rows, no recorded tools and no earlier schema-valid response.
+Unknown row types and conflicting finals still block. Both trace aliases
+are preserved and hash-verified; live polling checks stability of both
+and prints a safe progress status every 15s. This is experimental, not an
+official provider completion signal.
+
+After stopping the controller and closing only the experiment AGY window:
+
+    python -m ytresearch.research_batch recover-live-job --root D:\private-experiments --batch BATCH_ID --job JOB_ID --confirm-closed
+
+It uses the recovery baseline when a prior clipboard recovery receipt
+exists, otherwise the original baseline. No process launch or submission.
+On agreeing final traces, save response/aliases and a distinct recovery
+receipt with elapsed=null (actual timing unavailable). Otherwise emit only
+allowlisted trace structure and stop. Resume the original live-batch only
+after recovery succeeds. The capture remains review-required; no provider
+ingress or independent accuracy claim is made.
+
+If the post-close two-trace recovery cannot extract a final response,
+the owner may explicitly supply a private UTF-8 JSON reconstruction of
+the already observed TUI response via --operator-response RELATIVE_PATH.
+This is a last resort, never represented as a session capture or exact
+provider bytes. A valid correlated trace contradicting it blocks recovery.
+Its separate immutable snapshot/receipt is verified before resuming
+later jobs. Keep elapsed time null and compare accuracy as provisional
+operator-supplied evidence. Do not include private response text in Git.
+
+### WP3 first equal-span clip length experiment
+
+Research-only commands length-plan, length-report and length-run compare
+30, 60 and 120 second nonoverlapping tilings of the same 120-second
+lecture span using Flash Medium. An existing captured first 60-second
+window is required and re-derived from the exact approved source,
+original trial and model order; no retranscription. Six other
+single-model jobs are prepared with the existing clip validator.
+The plan is content-addressed and private. The common 120-second
+caption reference is evaluated once per tiling against chronological
+concatenation of its raw transcripts, including empty captures.
+Per-clip caption metrics remain diagnostic; overlapping subtitle
+events at interior boundaries are not summed. No human accuracy
+or provider ingress claims. Preparation and reporting submit zero
+model requests. A run requires explicit authorization and a total
+pending-call ceiling of at most six, validates all existing claims
+and captures, then uses the existing guided controller sequentially.
+Never retry an unsettled job. 300-second coverage is deferred until
+after this first equal-span pilot; existing 120-second preparation
+limit is unchanged. No changes to production workers.
+
+### Prompt insertion failure during guided length runs
+
+The session-capture staging path now keeps the verified prompt in the
+clipboard instead of replacing it after one second. Clipboard agreement
+does not establish TUI paste success. Dismiss visible announcement
+banners before READY, verify exactly one media attachment and the entire
+prompt, and if the input is empty paste the retained prompt once before
+submitting. No automated Enter. If the operator interrupted a claim
+because the prompt was absent and no request was submitted, close the
+old experiment window and use live-batch --recover-prompt-job JOB_ID
+only with that explicit attestation. The same one-time recovery fence,
+original claim, baseline and nonempty-trace checks apply; the immutable
+receipt distinguishes the prompt failure from a file-drop failure.
+No claim deletion or automatic retries. Resume length-run only after
+the recovered job is captured and its evidence validates.
+
+### WP3 equal-span 300-second extension
+
+After a completed v1 length plan, long-length-plan --prior-length-plan
+LENGTH_ID reuses the original 120-second capture. The supplied source
+manifest must reconstruct its exact original batch identity. Prepare
+two new baseline windows (120 seconds and a 60-second tail) and one
+300-second window, then compare the same complete 300-second span.
+Existing v1 plans remain valid; the extension has a separate immutable
+plan schema and predecessor link. The full-span reference is evaluated
+once per group and all captured empty transcripts count as missing
+content. Existing metric edit-cell limits remain in effect; null
+rates mean the metric was not computed, not zero errors.
+Only the research lecture preparation limit increases to 300 seconds;
+production workers are unchanged. The existing length-run command
+requires authorization and at most three new calls for the new schema.
+No automatic resubmission or replacement of the previous capture.
+
+### Bounded text clipboard recovery
+
+If the Windows clipboard cannot be opened for prompt copy or read,
+retry only local copy/read operations up to five attempts (backoff
+0.5, 1, 2, 3 seconds). Recheck the target window on each attempt.
+Do not retry focus failures, clipboard content mismatches, media paste,
+prompt paste, or model submission. After exhaustion raise the stable
+PROMPT_CLIPBOARD_ACCESS_FAILED code, without the native exception
+details. An interrupted pre-submit prompt-copy failure is eligible for
+the existing explicitly attested one-time recover-prompt-job route,
+only after closing the old window and passing its trace/claim checks.
+
+### Long-response alias diagnostics
+
+For an explicitly named existing job, trace-audit requires both
+observed SHA-256 digests and operator closure confirmation. It checks
+the original/recovery session baseline and exactly the two known
+aliases in the unique correlated session. It preserves those bytes
+privately, reports final-content lengths, validation status, JSON
+error offset and exact common-prefix length without response text.
+The claim and any existing capture are not replaced. A single strict
+candidate is made available for operator review only when no
+schema-valid response in either trace contradicts it. For future live
+batch jobs, a stable one-valid/two-DONE pair for 30 seconds yields a
+private review candidate and stops rather than waiting to the full
+timeout. The existing two-valid-agreeing automatic capture rule is
+unchanged; an explicit operator-response recovery is still needed.
+No provider terminal-event or ingress assertion, automatic retry,
+or new model call is introduced.
+
+### Explicit research full-primary fallback
+
+The existing long response audit found a complete valid full alias and
+a shorter malformed short alias, not simple end truncation. The research
+CLI lecture-batch/live-batch has an explicit --allow-full-primary opt-in.
+Default capture remains two agreeing valid aliases. After the existing
+30-second stable review condition, full-primary requires exactly two
+rows in each record, the same user content and media envelope, no tools,
+DONE model rows, a valid full final response, and a shorter malformed
+JSON short final body with object delimiters and at least 128 common
+prefix characters but not a pure prefix. These are conservative pilot
+criteria, not proof of equivalent responses or the vendor's shortening
+algorithm. Both unmodified traces are retained and checked on reuse.
+The capture is distinctly SESSION_FULL_PRIMARY, with independent alias
+agreement false. Valid conflicts, unknown layouts and other failed
+conditions remain review-only. No new submission or retry is introduced.
+Prior reconstructed captures are not reclassified. The offline trace
+audit now reports policy eligibility without changing capture state.
+
+### WP3 fixed-boundary overlap pilot
+
+overlap-plan takes a completed 300-second length plan and re-derives
+its three baseline batches against the explicit source manifest. Keep
+the core boundaries at 120+120+60 seconds and extend the first two
+windows to the right by 5 or 10 seconds, reusing the baseline and final
+60-second capture. Four new guided calls at most. The overall coverage
+is unchanged; total media input is 300, 310 or 320 seconds. The
+overlap-report compares naive concatenation and a conservative exact
+suffix/prefix word-match heuristic against the same whole-span caption
+proxy. Only a unique match of 3–40 whitespace words with at least 12
+normalized characters may be removed from the following segment.
+Ambiguous matches are left intact. This is NOT verified speech
+duplication; preserve all original transcripts and measure downstream
+error changes without claiming actual deletion accuracy. overlap-run
+requires explicit authorization, verifies captures/claims before
+continuation, and supports the existing explicit full-primary opt-in.
+
+### WP3 text context pilot
+
+context-plan uses the completed 300-second length plan's three
+nonoverlapping captures. Target is the middle 120-second transcript;
+CURRENT_ONLY and ADJACENT use the same target and instruction, differing
+only in whether the previous and following captured texts are supplied.
+Caption references are evaluation-only; no media, captions or source
+files are placed in the temporary CLI working directory. context-run
+requires explicit headless authorization, a maximum of two calls,
+AGY 1.5.16 and the requisite help flags; uses the existing no-tools
+agent and sandbox, one CLI invocation per reserved variant, no retry.
+The prompt is a process argument; OS isolation and no-tools enforcement
+are not independently verified. Terminal SUCCESS and a single
+schema-valid result are required, with agreement if both structured
+and string response fields are present. Raw stdout/stderr and derived
+responses are private and immutable; a failed or interrupted reservation
+blocks further runs. No model response is accepted as observed speech:
+compare baseline, target and whole-span caption metrics and change
+from raw, without altering the original transcription.
+
+### Headless identical-document recovery
+
+The context-specific terminal parser accepts a bounded sequence of up
+to 32 complete schema-valid JSON objects only when every object is
+identical as a parsed value. Original slices are strictly validated
+for duplicate keys and nonfinite constants. Conflicting objects,
+trailing prose, incomplete documents, and disagreement with structured
+output fail closed. Terminal SUCCESS and the unique final result event
+remain required. No partial DONE text is treated as a final object.
+context-recover requires an existing context reservation and exact
+stdout, stderr and canonical response hashes. It revalidates the
+original plan and prompt, preserves original archives and claim,
+writes a separate response and receipt, and never calls AGY.
+Historical elapsed time, agent digest and exit code remain null;
+recovery provenance is HEADLESS_ARCHIVE_RECOVERY. New live receipts
+record HEADLESS_LIVE and the terminal document count. Subsequent
+context-run resumes only pending modes. No automatic resubmission.
+
+
+### WP3-C completed operator pilot and WP3-D offline selective retry
+
+Operator reported both context variants complete after archive recovery of
+CURRENT_ONLY (no repeat call) and one ADJACENT invocation. Target caption
+proxy normalized edits changed from 44/642 to 41/642 and 44/642 respectively;
+whole span from 73/1567 to 70/1567 and 73/1567. ADJACENT elapsed time was
+97.406 seconds; recovered elapsed time is unknown. No independent speech
+verification. These aggregate operator results do not establish semantic
+improvement or a general benefit from context. Default to no mandatory
+text correction; selective text inference remains a research candidate.
+
+WP3-D adds two offline subcommands to the existing research batch module:
+
+    python -m ytresearch.research_batch context-change-report --root PRIVATE_ROOT --context-plan EXISTING_CONTEXT_ID
+    python -m ytresearch.research_batch retry-report --root PRIVATE_ROOT --length-plan EXISTING_LONG_LENGTH_ID
+
+No new media, model, GUI, session scan or retry reservation. Reuse validated
+length-state captures and the existing predecessor plan. Compare 120+120+60
+with the 30- and 60-second tilings of the first 120 seconds plus the original
+tail. All-clip concatenation metrics are separate from replacement candidates.
+The oracle enumerates contiguous replacements with no explicit defects in
+the replacement and required adjacent anchors; it ranks by common whole-span
+normalized CER, raw CER, raw WER, then counterfactual invocation count. It is
+a restricted, exploratory oracle, not a general upper bound. No score is
+used by the blind selector, which only chooses a clean whole-span tiling
+for an empty original and otherwise keeps the original. Nonempty partial
+replacement proposals are review-only; four exact unique neighboring words
+can locate a textual splice but cannot prove temporal alignment or preserve
+every spoken word. Missing, repeated, inverted or uncertain anchors block
+the partial candidate. Clip endpoints are assumed for edge candidates.
+Model-reported status, uncertainty and unclear markers are signals only;
+normalized characters per second is descriptive and never a failure cutoff.
+Unlocalized issues remain whole-clip review. No independent source identity
+proof beyond the existing length-plan and lecture-capture validation.
+
+Reports contain hashes, offsets, counts, caption proxy scores and candidate
+provenance, not transcript strings; immutable private report paths are
+length-plans/retry-reports and context-plans/<id>/change-reports.
+Context changes count SequenceMatcher operation blocks, not Levenshtein edits;
+semantic correctness is unverified. The existing source texts and claims
+remain unchanged. Counterfactual request counts and elapsed time are reused
+observations, not provider inference count or quota measurements. Actual
+WP3-D quality and detection effectiveness remain pending operator offline
+evaluation. No additional model invocation is authorized by this change.
