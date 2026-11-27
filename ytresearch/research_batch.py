@@ -1200,11 +1200,200 @@ def session_from_baseline(before):
     return after[0] / name
 
 
-def wait_live_pair(before, *, timeout=180, settle=5):
+def final_content_shape(raw):
+    """Report the final content's structure, never its text or arbitrary errors."""
+    lines = [line for line in raw.splitlines() if line.strip()]
+    result = {"content_kind": "UNAVAILABLE"}
+    if not lines or len(lines) > 10000:
+        return None, result
+    try:
+        row = parse_json(lines[-1])
+        if (not isinstance(row, dict) or row.get("type") != "PLANNER_RESPONSE"
+                or row.get("source") != "MODEL" or row.get("status") != "DONE"):
+            return None, result
+        content = row.get("content")
+        if not isinstance(content, str):
+            result["content_kind"] = "NON_STRING"
+            return None, result
+        encoded = content.encode("utf-8")
+    except (ValueError, UnicodeError, RecursionError):
+        return None, result
+    result = {"content_kind": "STRING", "content_chars": len(content),
+              "content_bytes": len(encoded), "content_sha256": digest(encoded)}
+    fence = re.fullmatch(r"\s*\x60{3}(?:json)?[ \t]*\r?\n(.*?)\r?\n\x60{3}[ \t]*\s*",
+                         content, re.I | re.S)
+    body = fence.group(1) if fence else content
+    result["whole_markdown_fence"] = fence is not None
+    result["body_chars"] = len(body)
+    result["body_starts_object"] = body.lstrip().startswith("{")
+    result["body_ends_object"] = body.rstrip().endswith("}")
+    if len(body.encode("utf-8")) > MAX_TEXT:
+        result["response_validation"] = "OVERSIZED"
+    else:
+        try:
+            validate_response(body.encode("utf-8"))
+            result["response_validation"] = "VALID"
+        except BatchError as exc:
+            result["response_validation"] = str(exc)
+            if str(exc) == "INVALID_JSON":
+                try:
+                    json.loads(body)
+                except json.JSONDecodeError as error:
+                    result["json_error_offset"] = error.pos
+                    result["json_error_at_end"] = error.pos >= len(body.rstrip())
+                except (ValueError, RecursionError):
+                    pass
+        except (ValueError, RecursionError, UnicodeError):
+            result["response_validation"] = "INVALID_CONTENT"
+    return content, result
+
+
+def audit_trace_pair(root, folder, session, expected_hashes, *, captured_response=None):
+    """Hash-pinned inspection of just two known files in one correlated session.
+
+    Preserve source bytes privately, expose only structural evidence, and never
+    mark a single valid response as captured. A conflicting schema-valid
+    response anywhere in either trace blocks the review candidate.
+    """
+    pair, info = read_agreeing_pair(session)
+    traces = info.get("traces", [])
+    names = {"transcript_full.jsonl", "transcript.jsonl"}
+    if (len(traces) != 2 or {t["filename"] for t in traces} != names
+            or {t["filename"]: t["sha256"] for t in traces} != expected_hashes):
+        raise BatchError("TRACE_AUDIT_HASH_OR_PAIR_MISMATCH")
+    records, contents = {}, {}
+    for path in scoped_session_candidates(session):
+        raw = read_bytes(path, MAX_LOG)
+        if digest(raw) != expected_hashes.get(path.name):
+            raise BatchError("TRACE_AUDIT_HASH_OR_PAIR_MISMATCH")
+        records[path.name] = raw
+        content, detail = final_content_shape(raw)
+        contents[path.name] = content
+        next(t for t in traces if t["filename"] == path.name)["final_content"] = detail
+    if set(records) != names:
+        raise BatchError("TRACE_AUDIT_HASH_OR_PAIR_MISMATCH")
+    full, short = contents["transcript_full.jsonl"], contents["transcript.jsonl"]
+    relation = None
+    if full is not None and short is not None:
+        prefix = 0
+        for a, b in zip(full, short):
+            if a != b:
+                break
+            prefix += 1
+        relation = {"common_prefix_chars": prefix,
+                    "short_is_exact_strict_prefix": len(short) < len(full) and prefix == len(short),
+                    "full_is_exact_strict_prefix": len(full) < len(short) and prefix == len(full),
+                    "exact_content_equal": full == short}
+    audit_dir = folder / "trace-audits" / digest(json_bytes(expected_hashes))[:24]
+    for name, raw in records.items():
+        write_once(root, audit_dir / (name + ".snapshot"), raw)
+    result = {"status": "DIAGNOSTIC_ONLY", "trace_diagnostic": info,
+              "final_content_relation": relation, "model_requests": 0,
+              "provider_ingress_verified": False, "automatic_capture": False,
+              "source_snapshots_preserved": True}
+    candidates = [c for raw in records.values()
+                  if (c := session_log_candidate(raw, live=True)) is not None]
+    if pair is None and len(candidates) == 1:
+        candidate = candidates[0]
+        response = validate_response(candidate)
+        conflict = False
+        for raw in records.values():
+            for line in raw.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = parse_json(line)
+                    other = response_from_content(row.get("content")) if isinstance(row, dict) else None
+                except (ValueError, UnicodeError, RecursionError):
+                    continue
+                if other is not None and validate_response(other) != response:
+                    conflict = True
+        if conflict:
+            result["status"] = "CONFLICTING_RESPONSE_FOUND"
+        elif captured_response is not None:
+            match = compare_capture_candidate(candidate, captured_response)
+            result["existing_capture_comparison"] = match
+            result["status"] = "EXISTING_CAPTURE_MATCH" if match in (
+                "EXACT_TEXT_MATCH", "JSON_CONTENT_MATCH") else "EXISTING_CAPTURE_CONFLICT"
+        else:
+            relative = audit_dir / "review-candidate.json"
+            write_once(root, relative, candidate)
+            result.update({"status": "OPERATOR_REVIEW_REQUIRED",
+                           "candidate_path": relative.as_posix(),
+                           "candidate_sha256": digest(candidate),
+                           "candidate_transcript_chars": len(response["transcript"])})
+    elif pair is not None and captured_response is not None:
+        result["existing_capture_comparison"] = compare_capture_candidate(pair[1], captured_response)
+    raw_result = json_bytes(result)
+    write_once(root, audit_dir / ("audit-" + digest(raw_result)[:24] + ".json"), raw_result)
+    return result
+
+
+def audit_job_traces(root, bid, job_id, *, operator_closed, full_hash, short_hash):
+    """Read-only with respect to capture/claim state; private audit snapshots only."""
+    if not operator_closed:
+        raise BatchError("OPERATOR_CLOSE_CONFIRMATION_REQUIRED")
+    expected = {"transcript_full.jsonl": full_hash, "transcript.jsonl": short_hash}
+    if any(not isinstance(h, str) or not re.fullmatch(r"[0-9a-f]{64}", h)
+           for h in expected.values()):
+        raise BatchError("TRACE_AUDIT_HASH_INVALID")
+    root, base, plan = load_plan(root, bid)
+    jobs = [j for j in plan["jobs"] if j["id"] == job_id]
+    if len(jobs) != 1:
+        raise BatchError("INVALID_RECOVERY_JOB")
+    job = jobs[0]
+    folder = base / job_id
+    global_lock = safe_path(root, Path("phase2-batches") / "live-controller.lock")
+    with global_lock.open("xb") as f:
+        f.write(b"TRACE_AUDIT_CONTROLLER\n")
+    try:
+        lock = safe_path(root, base / "controller.lock")
+        with lock.open("xb") as f:
+            f.write(b"TRACE_AUDIT_CONTROLLER\n")
+        try:
+            claim_data = parse_json(read_bytes(safe_path(root, folder / "claim.json")))
+            if claim_data != {"job": job, "reservation": "POSSIBLE_SUBMISSION"}:
+                raise BatchError("RECOVERY_CLAIM_INVALID")
+            workspace(root, base, job, plan)
+            row = next(r for r in report(root, bid)["jobs"] if r["id"] == job_id)
+            captured = None
+            if row["status"] == "CAPTURED":
+                completed_live_job(root, base, job, row, confirm_closed=True)
+                captured = read_bytes(safe_path(root, folder / "response.txt"))
+            elif row["status"] != "BLOCKED_UNSETTLED_CLAIM":
+                raise BatchError("RECOVERY_REQUIRES_EXISTING_CLAIM")
+            retry = safe_path(root, folder / "clipboard-recovery.json").exists()
+            baseline_name = "session-baseline-recovery.json" if retry else "session-baseline.json"
+            if retry:
+                attestation = parse_json(read_bytes(safe_path(root, folder / "clipboard-recovery.json")))
+                original = read_bytes(safe_path(root, folder / "session-baseline.json"))
+                if (attestation.get("job_id") != job_id or
+                        attestation.get("prior_baseline_sha256") != digest(original)):
+                    raise BatchError("RECOVERY_BASELINE_LINK_INVALID")
+            baseline = parse_json(read_bytes(safe_path(root, folder / baseline_name)))
+            names = baseline.get("directory_names")
+            if (baseline.get("schema") != "wp1_session_baseline_v1" or not isinstance(names, list)
+                    or len(names) > 10000 or any(not isinstance(n, str) for n in names)):
+                raise BatchError("SESSION_BASELINE_INVALID")
+            brain = brain_root()
+            if brain is None:
+                raise BatchError("SESSION_BASELINE_UNAVAILABLE")
+            session = session_from_baseline((brain, set(names)))
+            if session is None:
+                raise BatchError("TRACE_AUDIT_SESSION_NOT_FOUND")
+            return audit_trace_pair(root, folder, session, expected, captured_response=captured)
+        finally:
+            lock.unlink()
+    finally:
+        global_lock.unlink()
+
+
+def wait_live_pair(before, *, timeout=180, settle=5, review=None, review_settle=30):
     """Bounded polling of both final responses, with safe progress reporting."""
     started = time.monotonic()
     deadline = started + timeout
     previous = since = None
+    review_key = review_since = None
     next_progress = started + 15
     while time.monotonic() < deadline:
         session = session_from_baseline(before)
@@ -1219,7 +1408,24 @@ def wait_live_pair(before, *, timeout=180, settle=5):
             next_progress = now + 15
         if pair is None:
             previous = since = None
+            traces = info.get("traces", [])
+            if (review is not None and session is not None
+                    and info["status"] == "TRACE_FINAL_RESPONSE_NOT_VALID"
+                    and len(traces) == 2
+                    and sum(t["valid_final_response"] for t in traces) == 1
+                    and all(t["shape"]["last_row_is_done_model"] for t in traces)):
+                expected = {t["filename"]: t["sha256"] for t in traces}
+                key = (session.name, tuple(sorted(expected.items())))
+                if key != review_key:
+                    review_key, review_since = key, now
+                elif now - review_since >= review_settle:
+                    diagnostic = review(session, expected)
+                    print("LIVE_TRACE_REVIEW=" + json.dumps(diagnostic, ensure_ascii=True), flush=True)
+                    raise BatchError("LIVE_SINGLE_TRACE_REVIEW_REQUIRED_NO_RETRY")
+            else:
+                review_key = review_since = None
         else:
+            review_key = review_since = None
             key = (session.name, digest(pair[0]), digest(pair[2]))
             if key != previous:
                 previous, since = key, now
@@ -1670,7 +1876,9 @@ def live_job(root, base, plan, job, pg, pyperclip, *, recover_clipboard=False, r
     print("Verify the MP4 chip and prompt. Press Enter ONCE in AGY. No copy or close needed.", flush=True)
     print("Do not start other AGY sessions. On timeout do not resubmit.", flush=True)
     started = time.monotonic()
-    trace, raw, alias = wait_live_pair(before, timeout=600)
+    trace, raw, alias = wait_live_pair(
+        before, timeout=600,
+        review=lambda session, expected: audit_trace_pair(root, folder, session, expected))
     write_once(root, folder / "live-session.snapshot", trace)
     write_once(root, folder / "live-session-alias.snapshot", alias)
     status = capture(root, base, job, raw, time.monotonic() - started,
@@ -2198,6 +2406,13 @@ def main(argv=None):
     lx.add_argument("--pilot-batch", required=True)
     lx.add_argument("--max-new-calls", required=True, type=int)
     lx.add_argument("--authorize-guided", action="store_true")
+    ta = sub.add_parser("trace-audit")
+    ta.add_argument("--root", required=True)
+    ta.add_argument("--batch", required=True)
+    ta.add_argument("--job", required=True)
+    ta.add_argument("--full-sha256", required=True)
+    ta.add_argument("--short-sha256", required=True)
+    ta.add_argument("--confirm-closed", action="store_true")
     live_recovery = sub.add_parser("recover-live-job")
     live_recovery.add_argument("--root", required=True)
     live_recovery.add_argument("--batch", required=True)
@@ -2271,6 +2486,10 @@ def main(argv=None):
             result = run_length_plan(args.root, args.length_plan, args.paired_batch,
                                      args.pilot_batch, args.max_new_calls,
                                      authorized=args.authorize_guided)
+        elif args.command == "trace-audit":
+            result = audit_job_traces(args.root, args.batch, args.job,
+                                      operator_closed=args.confirm_closed,
+                                      full_hash=args.full_sha256, short_hash=args.short_sha256)
         elif args.command == "recover-live-job":
             result = recover_live_job(args.root, args.batch, args.job, operator_closed=args.confirm_closed,
                                       operator_response=args.operator_response)

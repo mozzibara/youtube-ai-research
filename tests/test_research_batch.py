@@ -895,6 +895,75 @@ class ResearchBatchTests(unittest.TestCase):
             with self.assertRaisesRegex(b.BatchError, "LECTURE_WINDOW_OUT_OF_RANGE"):
                 b.prepare_lecture(self.root, self.root, "manifest", 60, 301)
 
+    def trace_audit_fixture(self, short=None):
+        bid = self.prepare()
+        root, base, plan = b.load_plan(self.root, bid)
+        job = plan["jobs"][0]
+        folder = base / job["id"]
+        brain = root / "brain"
+        session = brain / "new"
+        session.mkdir(parents=True)
+        b.claim(root, base, job)
+        with patch.object(b, "fresh_brain_dirs", return_value=(brain, set())):
+            b.persist_session_baseline(root, folder)
+        full = '{"transcript":"alpha beta","uncertainties":[],"status":"COMPLETE"}'
+        if short is None:
+            short = full[:35]
+        user = {"type":"USER_INPUT","source":"USER_EXPLICIT","status":"DONE",
+                "content":b.PROMPT,"media":[{}]}
+        hashes = {}
+        for name, content in (("transcript_full.jsonl", full), ("transcript.jsonl", short)):
+            trace = b"\n".join(json.dumps(row).encode() for row in (
+                user, {"type":"PLANNER_RESPONSE","source":"MODEL","status":"DONE",
+                       "content":content}))
+            (session / name).write_bytes(trace)
+            hashes[name] = b.digest(trace)
+        return bid, root, base, job, brain, session, hashes
+
+    def test_trace_audit_preserves_single_candidate_without_capture(self):
+        bid, root, base, job, brain, session, hashes = self.trace_audit_fixture()
+        with patch.object(b, "brain_root", return_value=brain), patch.object(
+                b, "fresh_brain_dirs", return_value=(brain, {"new"})), patch.object(
+                b.subprocess, "run", side_effect=AssertionError("no provider")):
+            result = b.audit_job_traces(root, bid, job["id"], operator_closed=True,
+                                        full_hash=hashes["transcript_full.jsonl"],
+                                        short_hash=hashes["transcript.jsonl"])
+        self.assertEqual(result["status"], "OPERATOR_REVIEW_REQUIRED")
+        self.assertTrue(result["final_content_relation"]["short_is_exact_strict_prefix"])
+        self.assertEqual(result["final_content_relation"]["common_prefix_chars"], 35)
+        self.assertEqual(result["model_requests"], 0)
+        self.assertNotIn("alpha beta", json.dumps(result))
+        candidate = b.read_bytes(b.safe_path(root, result["candidate_path"]))
+        self.assertEqual(b.validate_response(candidate)["transcript"], "alpha beta")
+        self.assertEqual(b.report(root, bid)["jobs"][0]["status"], "BLOCKED_UNSETTLED_CLAIM")
+
+    def test_trace_audit_rejects_hash_change_and_valid_conflict(self):
+        other = '{"transcript":"conflict","uncertainties":[],"status":"COMPLETE"}'
+        bid, root, base, job, brain, session, hashes = self.trace_audit_fixture(short=other)
+        folder = base / job["id"]
+        wrong = dict(hashes, **{"transcript.jsonl": "0" * 64})
+        with self.assertRaisesRegex(b.BatchError, "TRACE_AUDIT_HASH_OR_PAIR_MISMATCH"):
+            b.audit_trace_pair(root, folder, session, wrong)
+        result = b.audit_trace_pair(root, folder, session, hashes)
+        self.assertEqual(result["trace_diagnostic"]["status"], "TRACE_FINAL_RESPONSE_CONFLICT")
+        self.assertNotIn("candidate_path", result)
+
+    def test_wait_live_single_valid_stable_stops_with_review_not_capture(self):
+        from unittest.mock import Mock
+        bid, root, base, job, brain, session, hashes = self.trace_audit_fixture()
+        clock = [0]
+        def sleep(seconds):
+            clock[0] += seconds
+        review = Mock(side_effect=lambda path, expected: b.audit_trace_pair(
+            root, base / job["id"], path, expected))
+        with patch.object(b, "session_from_baseline", return_value=session), patch.object(
+                b.time, "monotonic", side_effect=lambda: clock[0]), patch.object(
+                b.time, "sleep", side_effect=sleep):
+            with self.assertRaisesRegex(b.BatchError, "LIVE_SINGLE_TRACE_REVIEW_REQUIRED_NO_RETRY"):
+                b.wait_live_pair((brain, set()), timeout=10, review=review, review_settle=3)
+        review.assert_called_once_with(session, hashes)
+        self.assertEqual(b.report(root, bid)["jobs"][0]["status"], "BLOCKED_UNSETTLED_CLAIM")
+
     def test_stage_prompt_retains_clipboard_and_pastes_once(self):
         from unittest.mock import Mock
         pg, clip, target = Mock(), Mock(), Mock()

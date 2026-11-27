@@ -452,3 +452,21 @@ PROMPT_CLIPBOARD_ACCESS_FAILED code, without the native exception
 details. An interrupted pre-submit prompt-copy failure is eligible for
 the existing explicitly attested one-time recover-prompt-job route,
 only after closing the old window and passing its trace/claim checks.
+
+### Long-response alias diagnostics
+
+For an explicitly named existing job, trace-audit requires both
+observed SHA-256 digests and operator closure confirmation. It checks
+the original/recovery session baseline and exactly the two known
+aliases in the unique correlated session. It preserves those bytes
+privately, reports final-content lengths, validation status, JSON
+error offset and exact common-prefix length without response text.
+The claim and any existing capture are not replaced. A single strict
+candidate is made available for operator review only when no
+schema-valid response in either trace contradicts it. For future live
+batch jobs, a stable one-valid/two-DONE pair for 30 seconds yields a
+private review candidate and stops rather than waiting to the full
+timeout. The existing two-valid-agreeing automatic capture rule is
+unchanged; an explicit operator-response recovery is still needed.
+No provider terminal-event or ingress assertion, automatic retry,
+or new model call is introduced.
