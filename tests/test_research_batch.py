@@ -946,8 +946,8 @@ class ResearchBatchTests(unittest.TestCase):
         response = {"transcript": "alpha", "uncertainties": [], "status": "COMPLETE"}
         obj = json.dumps(response)
         def raw(text, **extra):
-            return b.json_bytes({"event": "result", "result": {
-                "status": "SUCCESS", "response": text, **extra}})
+            return json.dumps({"event": "result", "result": {
+                "status": "SUCCESS", "response": text, **extra}}).encode()
         self.assertEqual(b.context_terminal_details(raw((obj + "\n") * 4)), (response, 4))
         self.assertEqual(b.context_terminal_details(raw(obj * 2, structured_output=response)), (response, 2))
         with self.assertRaisesRegex(b.BatchError, "CONTEXT_TERMINAL_RESPONSE_CONFLICT"):

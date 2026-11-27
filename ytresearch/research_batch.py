@@ -2918,7 +2918,9 @@ def recover_context_response(root, cid, mode, stdout_hash, stderr_hash, response
             receipt = parse_json(read_bytes(receipt_path))
             if (not response_path.exists() or read_bytes(response_path) != response
                     or receipt.get("response_sha256") != response_hash
-                    or receipt.get("stdout_sha256") != stdout_hash):
+                    or receipt.get("stdout_sha256") != stdout_hash
+                    or receipt.get("stderr_sha256", stderr_hash) != stderr_hash
+                    or receipt.get("terminal_document_count", count) != count):
                 raise BatchError("CONTEXT_CAPTURE_MISMATCH")
             return {"status": "ALREADY_CAPTURED", "mode": mode,
                     "response_sha256": response_hash, "terminal_document_count": count,
